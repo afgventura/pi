@@ -172,7 +172,7 @@ import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
 import { editInExternalEditor } from "./external-editor.ts";
 import { refreshModelCatalogs } from "./model-catalog-refresh.ts";
-import { getModelChangeNotice, hasPhysicalModel } from "./model-change-notice.ts";
+import { getModelChangeNotice, isPhysicalResponse } from "./model-change-notice.ts";
 import { getModelSearchText } from "./model-search.ts";
 import { shareSession } from "./session-share.ts";
 import {
@@ -3385,7 +3385,10 @@ export class InteractiveMode {
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
-					this.maybeShowModelChangeNotice(event.message);
+					// message_start precedes adding the message to the session, so the latest response is the previous one.
+					const previous = this.session.messages.filter(isPhysicalResponse).at(-1);
+					const notice = getModelChangeNotice(previous, event.message, this.session.model);
+					if (notice) this.addModelChangeNotice(notice);
 					this.streamingComponent = new AssistantMessageComponent(
 						undefined,
 						this.hideThinkingBlock,
@@ -3881,9 +3884,9 @@ export class InteractiveMode {
 			const message = item;
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
-				const modelNotice = getModelChangeNotice(previousResponse, message, this.session.model);
-				if (modelNotice) this.addModelChangeNotice(modelNotice);
-				if (hasPhysicalModel(message)) previousResponse = message;
+				const notice = getModelChangeNotice(previousResponse, message, this.session.model);
+				if (notice) this.addModelChangeNotice(notice);
+				if (isPhysicalResponse(message)) previousResponse = message;
 				this.addMessageToChat(message);
 				// Render tool call components
 				for (const content of message.content) {
@@ -4003,21 +4006,6 @@ export class InteractiveMode {
 			).length;
 		}
 		return count;
-	}
-
-	/** Show a notice when a response comes from a different model than the previous one, e.g. after routing. */
-	private maybeShowModelChangeNotice(message: AssistantMessage): void {
-		// message_start reaches the UI before the message is persisted, so the branch holds the previous response.
-		let previous: AssistantMessage | undefined;
-		const branch = this.sessionManager.getBranch();
-		for (let i = branch.length - 1; i >= 0 && !previous; i--) {
-			const entry = branch[i];
-			if (entry.type === "message" && entry.message.role === "assistant" && hasPhysicalModel(entry.message)) {
-				previous = entry.message;
-			}
-		}
-		const notice = getModelChangeNotice(previous, message, this.session.model);
-		if (notice) this.addModelChangeNotice(notice);
 	}
 
 	private addModelChangeNotice(notice: string): void {
@@ -6473,18 +6461,6 @@ export class InteractiveMode {
 		}
 		info += `${theme.fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
 		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n\n`;
-		const model = this.session.model;
-		const selectedKey = model ? `${model.provider}/${model.id}` : undefined;
-		const routed = this.session.routedModel;
-		if (selectedKey) {
-			info += `${theme.bold("Model")}\n`;
-			info += `${theme.fg("dim", "Selected:")} ${selectedKey} ${theme.fg("dim", `(${this.session.thinkingLevel})`)}\n`;
-			if (routed) {
-				const level = routed.thinkingLevel ? ` ${theme.fg("dim", `(${routed.thinkingLevel})`)}` : "";
-				info += `${theme.fg("dim", "Routed to:")} ${routed.model.provider}/${routed.model.id}${level}\n`;
-			}
-			info += "\n";
-		}
 		info += `${theme.bold("Messages")}\n`;
 		info += `${theme.fg("dim", "Total:")} ${stats.totalMessages}\n`;
 		info += `${theme.fg("dim", "User:")} ${stats.userMessages}\n`;
@@ -6522,7 +6498,8 @@ export class InteractiveMode {
 			info += `\n${theme.bold("Cost")}\n`;
 			info += `${theme.fg("dim", "Total:")} $${stats.cost.toFixed(3)}`;
 			// A single entry repeats the total, unless it names a model other than the selected one.
-			if (usageBreakdown.length > 1 || (usageBreakdown.length === 1 && usageBreakdown[0].key !== selectedKey)) {
+			const model = this.session.model;
+			if (usageBreakdown.length > 1 || usageBreakdown[0]?.key !== `${model?.provider}/${model?.id}`) {
 				for (const entry of usageBreakdown) {
 					info += `\n  ${theme.fg("dim", `${entry.key}:`)} $${entry.cost.toFixed(3)} ${theme.fg("dim", `(${formatTokens(entry.tokens)} tokens)`)}`;
 				}
