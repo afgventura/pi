@@ -173,21 +173,6 @@ export class ToolExecutionComponent extends Container {
 		return new Text(text, 0, 0);
 	}
 
-	/**
-	 * Placeholder shown in place of a historical result's output, or undefined when there is no
-	 * output to hide. The result is still held, so expanding (click, or the expand key) reveals it.
-	 */
-	private createHistoricalHint(): Component | undefined {
-		const output = this.getTextOutput();
-		if (!output) return undefined;
-		return new Text(this.historicalHintText(output), 0, 0);
-	}
-
-	private historicalHintText(output: string): string {
-		const lineCount = output.split("\n").length;
-		return `${theme.fg("muted", `... (${lineCount} lines hidden,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
-	}
-
 	private createResultRegion(component: Component): MouseRegion {
 		return new MouseRegion(component, (event) => {
 			if (!this.result || event.type !== "click" || event.button !== "left") return undefined;
@@ -363,11 +348,9 @@ export class ToolExecutionComponent extends Container {
 			}
 
 			if (this.result && this.historical && !this.expanded) {
-				const hint = this.createHistoricalHint();
-				if (hint) {
-					renderContainer.addChild(this.createResultRegion(hint));
-					hasContent = true;
-				}
+				// A historical result renders nothing of its own: the call header above it already says
+				// what ran, and one "N lines hidden" line per tool result turns a long transcript into a
+				// wall of near-identical lines. The result is still held, so expanding reveals it.
 			} else if (this.result) {
 				const resultRenderer = this.getResultRenderer();
 				if (!resultRenderer) {
@@ -456,8 +439,7 @@ export class ToolExecutionComponent extends Container {
 			text += `\n\n${content}`;
 		}
 		if (hideOutput) {
-			const output = this.getTextOutput();
-			return output ? `${text}\n${this.historicalHintText(output)}` : text;
+			return text;
 		}
 		const output = this.getTextOutput();
 		if (output) {

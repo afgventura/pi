@@ -710,15 +710,16 @@ describe("ToolExecutionComponent historical results", () => {
 	}
 
 	// A resumed session can hold thousands of tool results. Only the most recent ones keep their
-	// output preview, so an older one renders a hint instead of the output.
-	test("hides the output of a historical result behind a hint", () => {
+	// output preview, and an older one renders its call header alone: a per-result "N lines hidden"
+	// line made a long transcript a wall of near-identical lines.
+	test("renders only the call header for a historical result", () => {
 		const component = createComponent();
 		component.setHistorical(true);
 		updateWithOutput(component);
 
 		const rendered = stripAnsi(component.render(120).join("\n"));
-		expect(rendered).toContain("3 lines hidden");
 		expect(rendered).not.toContain("first output line");
+		expect(rendered).not.toContain("lines hidden");
 	});
 
 	test("reveals the output when a historical result is expanded", () => {
@@ -737,14 +738,5 @@ describe("ToolExecutionComponent historical results", () => {
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("first output line");
 		expect(rendered).not.toContain("lines hidden");
-	});
-
-	// A result with nothing to hide must not gain a meaningless "0 lines hidden" line.
-	test("adds no hint when a historical result has no output", () => {
-		const component = createComponent();
-		component.setHistorical(true);
-		component.updateResult({ content: [], details: {}, isError: false }, false);
-
-		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("lines hidden");
 	});
 });
