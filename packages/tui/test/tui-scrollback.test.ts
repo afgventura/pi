@@ -144,6 +144,28 @@ describe("scrollback renderer", () => {
 		tui.stop();
 	});
 
+	// Rebuild paths re-create every item from the session entries. Without discarding the previous
+	// copy first, the transcript is committed twice - which is what a startup did, because session
+	// start rebuilds the chat after the initial load.
+	it("discards committed history on reset so a rebuild replaces rather than doubles it", async () => {
+		const viewport = new Lines();
+		viewport.lines = ["EDITOR"];
+		const { terminal, tui } = create(ROWS - 1, viewport);
+
+		tui.renderNow();
+		for (let i = 0; i < 10; i++) {
+			tui.commit([`line ${i}`]);
+		}
+		await terminal.flush();
+		assert.ok(terminal.getScrollBuffer().length > ROWS, "expected history before the reset");
+
+		tui.resetScrollback();
+		await terminal.flush();
+
+		assert.strictEqual(terminal.getScrollBuffer().length, ROWS, "history should be gone after a reset");
+		tui.stop();
+	});
+
 	it("does not render committed content again on later frames", async () => {
 		const viewport = new Lines();
 		viewport.lines = ["EDITOR"];

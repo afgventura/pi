@@ -72,6 +72,25 @@ export class TuiScrollback extends TuiBase implements TUI {
 	}
 
 	/**
+	 * Discard the committed history and the viewport, for a caller that is about to re-render the
+	 * whole transcript.
+	 *
+	 * Rebuild paths (initial load, compaction, tree navigation, settings change, session switch)
+	 * re-create every item from the session entries. Without this they would be committed on top of
+	 * the previous copy and the transcript would appear twice.
+	 */
+	resetScrollback(): void {
+		if (this.stopped) return;
+		this.viewportTop = 0;
+		this.viewportHeight = 0;
+		this.previousViewportLines = [];
+		this.previousWidth = 0;
+		// Clear the screen and the scrollback above it, then leave the cursor home so the next
+		// frame repaints the viewport from scratch.
+		this.terminal.write("\x1b[2J\x1b[H\x1b[3J");
+	}
+
+	/**
 	 * Write finished lines above the viewport, scrolling older ones into the terminal's scrollback.
 	 *
 	 * The caller is responsible for not committing content it still needs to update: once a line

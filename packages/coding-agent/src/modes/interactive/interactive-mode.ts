@@ -4051,6 +4051,13 @@ export class InteractiveMode {
 		entries: SessionEntry[],
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
+		// Every rebuild re-creates each item from the session entries. In scrollback mode the
+		// previous copy is already in the terminal's history, so it has to be discarded first or the
+		// transcript ends up written twice - which is what a startup did, because session start
+		// rebuilds the chat after the initial load.
+		if (this.renderer instanceof TuiScrollback) {
+			this.renderer.resetScrollback();
+		}
 		const items = entries.flatMap((entry): RenderSessionItem[] => {
 			if (entry.type === "custom" || (entry.type === "usage" && entry.kind === "cache_warm")) {
 				return [entry];
