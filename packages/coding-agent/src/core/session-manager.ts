@@ -20,7 +20,10 @@ import {
 	mkdirSync,
 	openSync,
 	readdirSync,
+	readFileSync,
 	readSync,
+	renameSync,
+	rmSync,
 	type Stats,
 	statSync,
 	writeFileSync,
@@ -603,6 +606,12 @@ export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultA
 
 const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
 const SESSION_HEADER_READ_BUFFER_SIZE = 4096;
+/**
+ * How much per-session message text is kept for picker search. See buildSessionInfo: the text is
+ * only ever read by the fuzzy match in the session selector, and holding the whole transcript for
+ * every listed session costs megabytes each.
+ */
+const MAX_SESSION_SEARCH_TEXT_BYTES = 4096;
 /** Bound synchronous header discovery while allowing large cwd and custom metadata fields. */
 const MAX_SESSION_HEADER_SCAN_BYTES = 1024 * 1024;
 
@@ -806,7 +815,11 @@ async function buildSessionInfo(
 		let header: SessionHeader | null = null;
 		let messageCount = 0;
 		let firstMessage = "";
-		const allMessages: string[] = [];
+		// Bounded on purpose. This text exists only so the session picker can search session
+		// contents; nothing else reads it. A long session can hold megabytes of it, and the
+		// picker holds one of these per listed session, so accumulating all of it to power a
+		// search over the whole transcript is not worth the memory it costs while open.
+		let searchText = "";
 		let name: string | undefined;
 		let lastActivityTime: number | undefined;
 
@@ -845,7 +858,10 @@ async function buildSessionInfo(
 			const textContent = extractTextContent(message);
 			if (!textContent) continue;
 
-			allMessages.push(textContent);
+			if (searchText.length < MAX_SESSION_SEARCH_TEXT_BYTES) {
+				const room = MAX_SESSION_SEARCH_TEXT_BYTES - searchText.length;
+				searchText += `${searchText ? " " : ""}${textContent.slice(0, room)}`;
+			}
 			if (!firstMessage && message.role === "user") {
 				firstMessage = textContent;
 			}
@@ -873,7 +889,7 @@ async function buildSessionInfo(
 			modified,
 			messageCount,
 			firstMessage: firstMessage || "(no messages)",
-			allMessagesText: allMessages.join(" "),
+			allMessagesText: searchText,
 		};
 	} catch {
 		signal?.throwIfAborted();
@@ -895,6 +911,8 @@ const ALL_SESSION_LIST_PUBLISH_INTERVAL = 100;
 
 interface SessionFileCandidate {
 	path: string;
+	/** File name, used as the key for the per-directory session index. */
+	name: string;
 	stats?: Stats;
 }
 
@@ -921,16 +939,105 @@ function sortSessionInfos(sessions: SessionInfo[]): SessionInfo[] {
 	return sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 }
 
+/**
+ * Per-directory cache of derived session metadata. Listing sessions otherwise re-reads and
+ * re-parses every session file on every open, which for a long-lived project is hundreds of
+ * files and hundreds of megabytes.
+ *
+ * Entries are validated on (size, mtimeMs), so an append-only session that changed is re-parsed
+ * and every untouched session is reused. The stored info holds only derived fields plus the
+ * bounded search text, so the file stays small.
+ */
+const SESSION_INDEX_FILE = ".session-index.json";
+const SESSION_INDEX_VERSION = 1;
+/** How many sessions to process between incremental index writes. See listSessionsFromDir. */
+const SESSION_INDEX_SAVE_INTERVAL = 32;
+
+/** SessionInfo with dates flattened, since JSON has no Date. */
+type SessionIndexInfo = Omit<SessionInfo, "created" | "modified"> & { created: number; modified: number };
+
+interface SessionIndexEntry {
+	size: number;
+	mtimeMs: number;
+	info: SessionIndexInfo;
+}
+
+interface SessionIndexFile {
+	version: number;
+	entries: Record<string, SessionIndexEntry>;
+}
+
+interface SessionIndexCache {
+	/** Entries read from disk at the start of the pass, keyed by file name. */
+	previous: Map<string, SessionIndexEntry>;
+	/** Entries to write back once the pass completes. */
+	next: Map<string, SessionIndexEntry>;
+}
+
+function loadSessionIndex(dir: string): Map<string, SessionIndexEntry> {
+	try {
+		const parsed = JSON.parse(readFileSync(join(dir, SESSION_INDEX_FILE), "utf8")) as SessionIndexFile;
+		if (parsed.version !== SESSION_INDEX_VERSION) return new Map();
+		return new Map(Object.entries(parsed.entries));
+	} catch {
+		// Missing, unreadable or corrupt: parse everything instead. Never fatal.
+		return new Map();
+	}
+}
+
+function saveSessionIndex(dir: string, entries: Map<string, SessionIndexEntry>): void {
+	const target = join(dir, SESSION_INDEX_FILE);
+	const temp = `${target}.${process.pid}.tmp`;
+	try {
+		writeFileSync(temp, JSON.stringify({ version: SESSION_INDEX_VERSION, entries: Object.fromEntries(entries) }));
+		// Rename so a concurrently running pi never observes a half-written index.
+		renameSync(temp, target);
+	} catch {
+		try {
+			rmSync(temp, { force: true });
+		} catch {
+			// Best effort; a leftover temp file is harmless.
+		}
+	}
+}
+
+/** Reuse the indexed info when the file is unchanged, otherwise parse it and record the result. */
+async function resolveSessionInfo(
+	file: SessionFileCandidate,
+	cache: SessionIndexCache | undefined,
+	signal?: AbortSignal,
+): Promise<SessionInfo | null> {
+	if (!cache) return buildSessionInfo(file.path, signal, file.stats);
+
+	const stats = file.stats ?? (await stat(file.path));
+	const cached = cache.previous.get(file.name);
+	if (cached && cached.size === stats.size && cached.mtimeMs === stats.mtimeMs) {
+		cache.next.set(file.name, cached);
+		return { ...cached.info, created: new Date(cached.info.created), modified: new Date(cached.info.modified) };
+	}
+
+	const info = await buildSessionInfo(file.path, signal, stats);
+	if (info) {
+		cache.next.set(file.name, {
+			size: stats.size,
+			mtimeMs: stats.mtimeMs,
+			info: { ...info, created: info.created.getTime(), modified: info.modified.getTime() },
+		});
+	}
+	return info;
+}
+
 function buildSessionInfosWithConcurrency(
 	files: SessionFileCandidate[],
 	onLoaded: (info: SessionInfo | null, index: number) => void,
 	signal?: AbortSignal,
+	cache?: SessionIndexCache,
 ): Promise<(SessionInfo | null)[]> {
 	return mapWithConcurrency(
 		files,
 		MAX_CONCURRENT_SESSION_INFO_LOADS,
 		async (file, index) => {
-			const info = await buildSessionInfo(file.path, signal, file.stats);
+			const info = await resolveSessionInfo(file, cache, signal);
 			onLoaded(info, index);
 			return info;
 		},
@@ -951,10 +1058,12 @@ async function listSessionsFromDir(
 		const files = dirEntries
 			.filter((file) => file.endsWith(".jsonl"))
 			.sort((a, b) => b.localeCompare(a))
-			.map((file) => ({ path: join(dir, file) }));
+			.map((file) => ({ path: join(dir, file), name: file }));
+		const cache: SessionIndexCache = { previous: loadSessionIndex(dir), next: new Map() };
 		const total = files.length;
 		const partialSessions: SessionInfo[] = [];
 		let loaded = 0;
+		let savedAt = 0;
 		const results = await buildSessionInfosWithConcurrency(
 			files,
 			(info) => {
@@ -963,9 +1072,19 @@ async function listSessionsFromDir(
 				const publishPartial =
 					loaded === 1 || loaded % CURRENT_SESSION_LIST_PUBLISH_INTERVAL === 0 || loaded === files.length;
 				onProgress?.(loaded, total, publishPartial ? sortSessionInfos([...partialSessions]) : undefined);
+				// Persist as we go. Listing is abortable, and a first pass over a large project takes
+				// seconds, so without this an aborted open saves nothing and the next one pays the
+				// whole parse again.
+				if (loaded - savedAt >= SESSION_INDEX_SAVE_INTERVAL) {
+					savedAt = loaded;
+					saveSessionIndex(dir, cache.next);
+				}
 			},
 			signal,
+			cache,
 		);
+		// Persist after the pass so the next open reuses every session that did not change.
+		saveSessionIndex(dir, cache.next);
 		return results.filter((info): info is SessionInfo => info !== null);
 	} catch {
 		signal?.throwIfAborted();
@@ -1970,9 +2089,9 @@ export class SessionManager {
 				MAX_CONCURRENT_SESSION_DISCOVERY_LOADS,
 				async (path): Promise<SessionFileCandidate> => {
 					try {
-						return { path, stats: await stat(path) };
+						return { path, name: basename(path), stats: await stat(path) };
 					} catch {
-						return { path };
+						return { path, name: basename(path) };
 					}
 				},
 				abortSignal,
