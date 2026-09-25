@@ -263,6 +263,18 @@ function isUsageSessionEntry(item: RenderSessionItem): item is Extract<SessionEn
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 
+/**
+ * How many of the most recent tool results keep their output preview when the transcript is
+ * re-rendered (resume, compaction rebuild, settings change). Everything older collapses to its
+ * call header and stays expandable.
+ *
+ * Why: tool output is nearly all of a long transcript. One measured 36 MB session held 5,204
+ * tool results; at ten preview lines each that is roughly 100k rendered lines, and regular TUI
+ * mode writes every one of them to the terminal on resume. Keeping the recent window preserves
+ * the useful case (see what the current work is doing) without paying for the history.
+ */
+const RECENT_TOOL_OUTPUT_KEPT = 20;
+
 function isDeadTerminalError(error: unknown): boolean {
 	if (!error || typeof error !== "object" || !("code" in error)) {
 		return false;
@@ -3856,6 +3868,24 @@ export class InteractiveMode {
 			? collectCacheMisses(this.sessionManager.getEntries(), this.session.modelRuntime)
 			: new Map<AssistantMessage, CacheMiss>();
 
+		// Tool output dominates a re-rendered transcript, so only the most recent results keep
+		// their preview. Collect the call ids in render order and mark the older ones historical.
+		const toolCallIds: string[] = [];
+		for (const item of items) {
+			if (isCustomSessionEntry(item) || isUsageSessionEntry(item) || isCompactionCostNotice(item)) {
+				continue;
+			}
+			if (item.role !== "assistant") continue;
+			for (const content of item.content) {
+				if (content.type === "toolCall") {
+					toolCallIds.push(content.id);
+				}
+			}
+		}
+		const historicalToolCalls = new Set(
+			toolCallIds.slice(0, Math.max(0, toolCallIds.length - RECENT_TOOL_OUTPUT_KEPT)),
+		);
+
 		if (options.updateFooter) {
 			this.footer.invalidate();
 			this.updateEditorBorderColor();
@@ -3895,6 +3925,7 @@ export class InteractiveMode {
 							this.sessionManager.getCwd(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
+						component.setHistorical(historicalToolCalls.has(content.id));
 						this.chatContainer.addChild(component);
 
 						if (message.stopReason === "aborted" || message.stopReason === "error") {

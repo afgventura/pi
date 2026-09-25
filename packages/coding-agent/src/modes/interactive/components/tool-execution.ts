@@ -59,6 +59,7 @@ export class ToolExecutionComponent extends Container {
 	private toolCallId: string;
 	private args: any;
 	private expanded = false;
+	private historical = false;
 	private showImages: boolean;
 	private imageWidthCells: number;
 	private isPartial = true;
@@ -172,6 +173,21 @@ export class ToolExecutionComponent extends Container {
 		return new Text(text, 0, 0);
 	}
 
+	/**
+	 * Placeholder shown in place of a historical result's output, or undefined when there is no
+	 * output to hide. The result is still held, so expanding (click, or the expand key) reveals it.
+	 */
+	private createHistoricalHint(): Component | undefined {
+		const output = this.getTextOutput();
+		if (!output) return undefined;
+		return new Text(this.historicalHintText(output), 0, 0);
+	}
+
+	private historicalHintText(output: string): string {
+		const lineCount = output.split("\n").length;
+		return `${theme.fg("muted", `... (${lineCount} lines hidden,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+	}
+
 	private createResultRegion(component: Component): MouseRegion {
 		return new MouseRegion(component, (event) => {
 			if (!this.result || event.type !== "click" || event.button !== "left") return undefined;
@@ -243,6 +259,15 @@ export class ToolExecutionComponent extends Container {
 
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
+		this.updateDisplay();
+	}
+
+	/**
+	 * Mark this result as restored from earlier in the session. Historical results render a
+	 * summary instead of their output until the user expands them; live results are unaffected.
+	 */
+	setHistorical(historical: boolean): void {
+		this.historical = historical;
 		this.updateDisplay();
 	}
 
@@ -337,7 +362,13 @@ export class ToolExecutionComponent extends Container {
 				}
 			}
 
-			if (this.result) {
+			if (this.result && this.historical && !this.expanded) {
+				const hint = this.createHistoricalHint();
+				if (hint) {
+					renderContainer.addChild(this.createResultRegion(hint));
+					hasContent = true;
+				}
+			} else if (this.result) {
 				const resultRenderer = this.getResultRenderer();
 				if (!resultRenderer) {
 					const component = this.createResultFallback();
@@ -368,7 +399,7 @@ export class ToolExecutionComponent extends Container {
 			}
 		} else {
 			this.contentText.setCustomBgFn(bgFn);
-			this.contentText.setText(this.formatToolExecution());
+			this.contentText.setText(this.formatToolExecution(this.historical && !this.expanded));
 			hasContent = true;
 		}
 
@@ -418,11 +449,15 @@ export class ToolExecutionComponent extends Container {
 		return getRenderedTextOutput(this.result, this.showImages);
 	}
 
-	private formatToolExecution(): string {
+	private formatToolExecution(hideOutput = false): string {
 		let text = theme.fg("toolTitle", theme.bold(this.toolName));
 		const content = JSON.stringify(this.args, null, 2);
 		if (content) {
 			text += `\n\n${content}`;
+		}
+		if (hideOutput) {
+			const output = this.getTextOutput();
+			return output ? `${text}\n${this.historicalHintText(output)}` : text;
 		}
 		const output = this.getTextOutput();
 		if (output) {

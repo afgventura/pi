@@ -685,3 +685,66 @@ describe("ToolExecutionComponent parity", () => {
 		});
 	}
 });
+
+describe("ToolExecutionComponent historical results", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	const OUTPUT = "first output line\nsecond output line\nthird output line";
+
+	function createComponent(): ToolExecutionComponent {
+		return new ToolExecutionComponent(
+			"custom_tool",
+			"tool-historical",
+			{},
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+	}
+
+	function updateWithOutput(component: ToolExecutionComponent): void {
+		component.updateResult({ content: [{ type: "text", text: OUTPUT }], details: {}, isError: false }, false);
+	}
+
+	// A resumed session can hold thousands of tool results. Only the most recent ones keep their
+	// output preview, so an older one renders a hint instead of the output.
+	test("hides the output of a historical result behind a hint", () => {
+		const component = createComponent();
+		component.setHistorical(true);
+		updateWithOutput(component);
+
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("3 lines hidden");
+		expect(rendered).not.toContain("first output line");
+	});
+
+	test("reveals the output when a historical result is expanded", () => {
+		const component = createComponent();
+		component.setHistorical(true);
+		updateWithOutput(component);
+		component.setExpanded(true);
+
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("first output line");
+	});
+
+	test("leaves a live result showing its output", () => {
+		const component = createComponent();
+		updateWithOutput(component);
+
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("first output line");
+		expect(rendered).not.toContain("lines hidden");
+	});
+
+	// A result with nothing to hide must not gain a meaningless "0 lines hidden" line.
+	test("adds no hint when a historical result has no output", () => {
+		const component = createComponent();
+		component.setHistorical(true);
+		component.updateResult({ content: [], details: {}, isError: false }, false);
+
+		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("lines hidden");
+	});
+});
