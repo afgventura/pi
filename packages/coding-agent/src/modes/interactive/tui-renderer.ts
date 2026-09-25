@@ -26,6 +26,18 @@ export interface InteractiveTuiOptions {
 }
 
 /** Composition root shared by coding-agent presentations. */
+/** Composition root shared by coding-agent presentations. */
+export function createInteractiveTui(options: InteractiveTuiOptions & { readonly tuiMode: "fullscreen" }): TuiAltScreen;
+export function createInteractiveTui(options: InteractiveTuiOptions & { readonly tuiMode: "regular" }): TuiMainScreen;
+export function createInteractiveTui(
+	options: InteractiveTuiOptions & { readonly tuiMode: "scrollback" },
+): TuiScrollback;
+/**
+ * General overload for callers holding a `TuiMode` value rather than a literal. It has to be a
+ * declared overload, not just the implementation signature: without it a union-typed argument
+ * matches none of the narrowing overloads above.
+ */
+export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScreen | TuiAltScreen | TuiScrollback;
 export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScreen | TuiAltScreen | TuiScrollback {
 	const terminal = options.terminal ?? new ProcessTerminal();
 	if (options.tuiMode === "scrollback") {
