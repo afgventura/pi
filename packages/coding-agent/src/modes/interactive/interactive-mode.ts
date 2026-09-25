@@ -910,7 +910,7 @@ export class InteractiveMode {
 
 		const finished = children.slice(0, cut);
 		for (const child of finished) {
-			this.renderer.commit(child.render(width), false);
+			this.renderer.commit(child.render(width));
 		}
 		for (const child of finished) {
 			this.chatContainer.removeChild(child);

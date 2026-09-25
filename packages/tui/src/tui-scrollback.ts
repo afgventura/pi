@@ -67,6 +67,18 @@ export class TuiScrollback extends TuiBase implements TUI {
 	private viewportTop = 0;
 	/** Set by resetScrollback; the next frame clears the screen before repainting. */
 	private needsClear = false;
+	/**
+	 * Committed lines waiting to be written above the viewport.
+	 *
+	 * Accumulated rather than written by `commit()`, and flushed once per frame after any clear,
+	 * which is how codex does it (`pending_history_lines` in Tui::draw). Writing straight from
+	 * commit() meant a rebuild's clear could land after the content it was meant to replace: the
+	 * drain runs at the start of the frame, so its lines were already on screen when the clear fired,
+	 * and the transcript ended up written twice.
+	 */
+	private pendingHistoryLines: string[] = [];
+	/** Rows the scroll region must give up before the history flush, set by resizeViewport. */
+	private pendingScroll = 0;
 	private beforeRender: (() => void) | undefined;
 
 	/** Rows this renderer currently owns at the bottom of the screen. */
@@ -121,40 +133,14 @@ export class TuiScrollback extends TuiBase implements TUI {
 	}
 
 	/**
-	 * Write finished lines above the viewport, scrolling older ones into the terminal's scrollback.
+	 * Queue finished lines to be written above the viewport on the next frame.
 	 *
-	 * The caller is responsible for not committing content it still needs to update: once a line
-	 * is in the terminal's scrollback this renderer can no longer change or remove it.
+	 * The caller is responsible for not committing content it still needs to update: once written,
+	 * this renderer can no longer change or remove it.
 	 */
-	commit(lines: readonly string[], requestRepaint = true): void {
+	commit(lines: readonly string[]): void {
 		if (lines.length === 0 || this.stopped) return;
-		if (this.viewportTop === 0) {
-			// No room above the viewport: nothing can scroll, so drop the lines rather than
-			// overwrite the viewport.
-			return;
-		}
-
-		const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
-		output.append("\x1b[?2026h"); // Begin synchronized output
-		// Limit scrolling to the rows above the viewport. Writing newlines at the bottom of that
-		// region then scrolls only those rows, so committed lines leave through the top and the
-		// viewport is left exactly as it was.
-		output.append(`\x1b[1;${this.viewportTop}r`);
-		output.append(`\x1b[${this.viewportTop};1H`);
-		for (const line of lines) {
-			output.append("\r\n");
-			output.append("\x1b[K");
-			output.append(line);
-		}
-		output.append("\x1b[r"); // Reset the scroll region to the full screen
-		output.append("\x1b[?2026l");
-		output.flush();
-
-		// The viewport content did not change, but the cursor is now in the scroll region. Repaint
-		// so it returns to the viewport; the diff makes that a cursor move and nothing else.
-		// A caller committing from inside a frame (see setBeforeRender) is about to paint the
-		// viewport anyway, so it can skip this.
-		if (requestRepaint) this.requestRender(true);
+		for (const line of lines) this.pendingHistoryLines.push(line);
 	}
 
 	protected doRender(): void {
@@ -184,8 +170,32 @@ export class TuiScrollback extends TuiBase implements TUI {
 			// Clear the screen and the scrollback above it in the same synchronized update as the
 			// repaint below, so the terminal never displays the cleared state.
 			this.needsClear = false;
+			this.pendingHistoryLines = [];
 			output.append("\x1b[2J\x1b[H\x1b[3J");
 		}
+		// Give the viewport its new rows first, then write the queued history into what is left.
+		// Both are inside this one synchronized update, so the screen never shows an intermediate
+		// state - and a clear, if any, has already happened above.
+		if (this.pendingScroll > 0 && this.viewportTop > 0) {
+			output.append(`\x1b[1;${this.viewportTop}r`);
+			output.append(`\x1b[${this.viewportTop};1H`);
+			for (let i = 0; i < Math.min(this.pendingScroll, this.viewportTop); i++) output.append("\r\n");
+			output.append("\x1b[r");
+		}
+		this.pendingScroll = 0;
+		if (this.pendingHistoryLines.length > 0 && this.viewportTop > 0) {
+			// Limit scrolling to the rows above the viewport, so writing newlines there scrolls only
+			// those rows and leaves the viewport exactly as it was.
+			output.append(`\x1b[1;${this.viewportTop}r`);
+			output.append(`\x1b[${this.viewportTop};1H`);
+			for (const line of this.pendingHistoryLines) {
+				output.append("\r\n");
+				output.append("\x1b[K");
+				output.append(line);
+			}
+			output.append("\x1b[r"); // Reset the scroll region to the full screen
+		}
+		this.pendingHistoryLines = [];
 		const widthChanged = this.previousWidth !== width;
 		for (let row = 0; row < viewportLines.length; row++) {
 			const line = viewportLines[row] ?? "";
@@ -215,17 +225,7 @@ export class TuiScrollback extends TuiBase implements TUI {
 	 */
 	private resizeViewport(rows: number, desired: number): void {
 		const grow = desired - this.viewportHeight;
-		if (grow > 0 && this.viewportTop > 0) {
-			const scroll = Math.min(grow, this.viewportTop);
-			const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
-			output.append("\x1b[?2026h");
-			output.append(`\x1b[1;${this.viewportTop}r`);
-			output.append(`\x1b[${this.viewportTop};1H`);
-			for (let i = 0; i < scroll; i++) output.append("\r\n");
-			output.append("\x1b[r");
-			output.append("\x1b[?2026l");
-			output.flush();
-		}
+		if (grow > 0) this.pendingScroll = Math.min(grow, this.viewportTop);
 		this.viewportHeight = desired;
 		this.viewportTop = Math.max(0, rows - desired);
 		if (grow !== 0) this.previousViewportLines = [];

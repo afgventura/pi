@@ -68,6 +68,7 @@ describe("scrollback renderer", () => {
 
 		tui.renderNow();
 		tui.commit(["one", "two"]);
+		tui.renderNow(); // committed lines are queued and flushed on the next frame
 		await terminal.flush();
 		const screen = terminal.getViewport();
 
@@ -86,6 +87,7 @@ describe("scrollback renderer", () => {
 		for (let i = 0; i < 20; i++) {
 			tui.commit([`line ${i}`]);
 		}
+		tui.renderNow(); // queued until a frame flushes them
 		await terminal.flush();
 
 		const screen = terminal.getViewport();
@@ -151,6 +153,7 @@ describe("scrollback renderer", () => {
 		for (let i = 0; i < 10; i++) {
 			tui.commit([`line ${i}`]);
 		}
+		tui.renderNow();
 		await terminal.flush();
 		assert.ok(
 			terminal.getViewport().some((line) => line.startsWith("line ")),
