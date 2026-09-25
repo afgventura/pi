@@ -988,6 +988,10 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	private requestImmediateRender(): void {
+		// Input changed something (the editor's text, at minimum), so cached component renders are
+		// no longer valid. This path deliberately skips requestRender() to bypass the throttle, so
+		// the dirty flag has to be set here too.
+		this.contentDirty = true;
 		this.cancelRenderTimer();
 		this.renderRequested = true;
 		if (this.immediateRenderScheduled) return;
