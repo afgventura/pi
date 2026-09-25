@@ -160,6 +160,7 @@ describe("scrollback renderer", () => {
 		assert.ok(terminal.getScrollBuffer().length > ROWS, "expected history before the reset");
 
 		tui.resetScrollback();
+		tui.renderNow(); // the clear is deferred to the next frame, so that it lands with the repaint
 		await terminal.flush();
 
 		assert.strictEqual(terminal.getScrollBuffer().length, ROWS, "history should be gone after a reset");

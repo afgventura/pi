@@ -40,6 +40,8 @@ export class TuiScrollback extends TuiBase implements TUI {
 	private previousWidth = 0;
 	/** 0-based row where the viewport starts. Everything above it belongs to the terminal. */
 	private viewportTop = 0;
+	/** Set by resetScrollback; the next frame clears the screen before repainting. */
+	private needsClear = false;
 	private beforeRender: (() => void) | undefined;
 
 	/** Rows this renderer currently owns at the bottom of the screen. */
@@ -78,6 +80,11 @@ export class TuiScrollback extends TuiBase implements TUI {
 	 * Rebuild paths (initial load, compaction, tree navigation, settings change, session switch)
 	 * re-create every item from the session entries. Without this they would be committed on top of
 	 * the previous copy and the transcript would appear twice.
+	 *
+	 * Only records the intent: the screen is cleared at the start of the next frame, inside the same
+	 * synchronized update as the viewport repaint. Clearing here instead leaves the terminal showing
+	 * an empty screen until that frame lands, and a rebuild runs several times during startup, so the
+	 * display flickered - the input appeared to jump in and out of place.
 	 */
 	resetScrollback(): void {
 		if (this.stopped) return;
@@ -85,9 +92,7 @@ export class TuiScrollback extends TuiBase implements TUI {
 		this.viewportHeight = 0;
 		this.previousViewportLines = [];
 		this.previousWidth = 0;
-		// Clear the screen and the scrollback above it, then leave the cursor home so the next
-		// frame repaints the viewport from scratch.
-		this.terminal.write("\x1b[2J\x1b[H\x1b[3J");
+		this.needsClear = true;
 	}
 
 	/**
@@ -150,6 +155,12 @@ export class TuiScrollback extends TuiBase implements TUI {
 
 		const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
 		output.append("\x1b[?2026h");
+		if (this.needsClear) {
+			// Clear the screen and the scrollback above it in the same synchronized update as the
+			// repaint below, so the terminal never displays the cleared state.
+			this.needsClear = false;
+			output.append("\x1b[2J\x1b[H\x1b[3J");
+		}
 		const widthChanged = this.previousWidth !== width;
 		for (let row = 0; row < viewportLines.length; row++) {
 			const line = viewportLines[row] ?? "";
