@@ -203,6 +203,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private previousScreenHeight = 0;
 	private layoutRoot: Component | undefined;
 	private currentLayout: LayoutFrame | undefined;
+	/**
+	 * Component renders carried between frames. Cleared whenever a component's content changed,
+	 * so a scroll-only frame reuses them and costs the viewport rather than the whole transcript.
+	 */
+	private readonly layoutRenderCache = new Map<Component, Map<number, string[]>>();
 	private readonly implicitDocument: Component;
 	private readonly implicitScrollView: ScrollView;
 	private readonly flashes: AltScreenFlashContainer;
@@ -1663,9 +1668,21 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const width = Math.max(1, this.terminal.columns);
 		const height = Math.max(1, this.terminal.rows);
 		const root = this.layoutRoot ?? this.implicitScrollView;
-		let nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
+		// A scroll-only frame reuses the previous component renders, so scrolling a long transcript
+		// costs the viewport instead of the whole document. Any content change goes through
+		// requestRender(), which marks the content dirty and clears the cache before this runs.
+		const contentDirty = this.consumeContentDirty();
+		const frameOptions = {
+			requestScrollRender: () => this.requestScrollRender(),
+			renderCache: this.layoutRenderCache,
+			contentDirty,
+		};
+		let nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender(), frameOptions);
 		if (this.refreshSearch(nextLayout)) {
-			nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
+			nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender(), {
+				...frameOptions,
+				contentDirty: false,
+			});
 		}
 		let screen = nextLayout.lines.map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
 		screen = this.applySearchHighlights(screen, nextLayout);

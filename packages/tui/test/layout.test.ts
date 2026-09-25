@@ -365,3 +365,47 @@ describe("viewport layout", () => {
 		assert.strictEqual(second.root.children[0]?.lines?.length, 3);
 	});
 });
+
+describe("scroll content cache", () => {
+	function build() {
+		const text = new Text("first", 0, 0);
+		const transcript = new ScrollView(text, { follow: "none", primary: true });
+		const root = new VStack([{ component: transcript, basis: 0, grow: 1, minSize: 1 }]);
+		const cache = new Map();
+		const frame = (contentDirty: boolean) =>
+			visibleLines(renderLayoutFrame(root, 10, 3, () => {}, { renderCache: cache, contentDirty }).lines);
+		return { text, frame };
+	}
+
+	it("shows new content when dirty even though the cache is carried across frames", () => {
+		const { text, frame } = build();
+
+		assert.ok(frame(true).some((line) => line.includes("first")));
+
+		text.setText("second");
+		const second = frame(true);
+		assert.ok(second.some((line) => line.includes("second")));
+		assert.ok(!second.some((line) => line.includes("first")));
+	});
+
+	it("reuses the cache on a scroll-only frame and still shows the latest content", () => {
+		const { text, frame } = build();
+
+		text.setText("second");
+		const dirty = frame(true);
+		const scrollOnly = frame(false);
+
+		assert.deepStrictEqual(scrollOnly, dirty);
+	});
+
+	it("keeps the per-frame behaviour when no cache is supplied", () => {
+		const text = new Text("first", 0, 0);
+		const transcript = new ScrollView(text, { follow: "none", primary: true });
+		const root = new VStack([{ component: transcript, basis: 0, grow: 1, minSize: 1 }]);
+
+		renderLayoutFrame(root, 10, 3, () => {});
+		text.setText("second");
+
+		assert.ok(visibleLines(renderLayoutFrame(root, 10, 3, () => {}).lines).some((line) => line.includes("second")));
+	});
+});
