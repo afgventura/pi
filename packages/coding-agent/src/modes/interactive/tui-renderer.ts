@@ -1,12 +1,23 @@
 import type { Terminal } from "@earendil-works/pi-tui";
-import { ProcessTerminal, type TUI, TuiAltScreen, TuiMainScreen } from "@earendil-works/pi-tui";
+import {
+	ProcessTerminal,
+	type TUI,
+	TuiAltScreen,
+	TuiMainScreen,
+	type TuiMode,
+	TuiScrollback,
+} from "@earendil-works/pi-tui";
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { keyDisplayText } from "./components/keybinding-hints.ts";
 import { theme } from "./theme/theme.ts";
 
 export interface InteractiveTuiOptions {
-	readonly tuiMode: "regular" | "fullscreen";
+	/**
+	 * Renderer to build. `"scrollback"` owns only a bottom viewport and streams finished content
+	 * into the terminal's scrollback, so a frame costs the viewport rather than the transcript.
+	 */
+	readonly tuiMode: TuiMode;
 	readonly showHardwareCursor: boolean;
 	readonly logDirectory: string;
 	readonly terminal?: Terminal;
@@ -15,11 +26,23 @@ export interface InteractiveTuiOptions {
 }
 
 /** Composition root shared by coding-agent presentations. */
+/** Composition root shared by coding-agent presentations. */
 export function createInteractiveTui(options: InteractiveTuiOptions & { readonly tuiMode: "fullscreen" }): TuiAltScreen;
 export function createInteractiveTui(options: InteractiveTuiOptions & { readonly tuiMode: "regular" }): TuiMainScreen;
-export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScreen | TuiAltScreen;
-export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScreen | TuiAltScreen {
+export function createInteractiveTui(
+	options: InteractiveTuiOptions & { readonly tuiMode: "scrollback" },
+): TuiScrollback;
+/**
+ * General overload for callers holding a `TuiMode` value rather than a literal. It has to be a
+ * declared overload, not just the implementation signature: without it a union-typed argument
+ * matches none of the narrowing overloads above.
+ */
+export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScreen | TuiAltScreen | TuiScrollback;
+export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScreen | TuiAltScreen | TuiScrollback {
 	const terminal = options.terminal ?? new ProcessTerminal();
+	if (options.tuiMode === "scrollback") {
+		return new TuiScrollback(terminal, options.showHardwareCursor, options.logDirectory);
+	}
 	if (options.tuiMode === "fullscreen") {
 		const styleSearchMatch = (text: string) => theme.bg("searchMatchBg", theme.fg("searchMatchText", text));
 		return new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, {

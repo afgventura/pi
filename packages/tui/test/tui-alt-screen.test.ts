@@ -1981,3 +1981,47 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 });
+
+/** A component whose content changes, driven by input. */
+class TypingComponent {
+	lines: string[] = ["before"];
+
+	handleInput(_data: string): void {}
+
+	render(): string[] {
+		return this.lines;
+	}
+
+	invalidate(): void {}
+}
+
+// Regression: keyboard input renders through requestImmediateRender(), which bypasses
+// requestRender() on purpose to avoid the throttled timer path. A layout render cache that only
+// requestRender() invalidated therefore served stale lines, so a typed character did not appear
+// until something else happened to change the content.
+describe("TuiAltScreen input-driven content", () => {
+	it("shows content changed by keyboard input on the next frame", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		const editor = new TypingComponent();
+		tui.addChild(editor);
+		tui.start();
+		tui.setFocus(editor);
+		await terminal.waitForRender();
+		assert.ok(
+			terminal.getViewport().some((line) => line.includes("before")),
+			`expected the initial content, got ${JSON.stringify(terminal.getViewport())}`,
+		);
+
+		// Change the content, then let input trigger the frame, exactly as typing does.
+		editor.lines = ["after"];
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+
+		assert.ok(
+			terminal.getViewport().some((line) => line.includes("after")),
+			`expected the new content, got ${JSON.stringify(terminal.getViewport())}`,
+		);
+		tui.stop();
+	});
+});

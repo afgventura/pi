@@ -54,6 +54,7 @@ interface LayoutContext {
 	viewport: { width: number; height: number };
 	renderCache: Map<Component, Map<number, string[]>>;
 	requestRender: () => void;
+	requestScrollRender: () => void;
 	primaryScrollView: ScrollView | undefined;
 }
 
@@ -147,7 +148,7 @@ function layoutComponent(
 		);
 		const contentHeight = childBox.rect.height;
 		const viewportHeight = height === undefined ? contentHeight : Math.max(0, Math.floor(height));
-		node.state.updateLayout(contentHeight, viewportHeight, context.requestRender);
+		node.state.updateLayout(contentHeight, viewportHeight, context.requestScrollRender);
 		translateBox(childBox, previousScrollTop - node.state.scrollTop);
 		const scrollView = node.state as ScrollView;
 		if (node.state.primary || !context.primaryScrollView) context.primaryScrollView = scrollView;
@@ -376,18 +377,35 @@ function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
 	paintScrollbar(box, screen, totalWidth);
 }
 
+export interface RenderLayoutFrameOptions {
+	/** Called when only the scroll offset or a scrollbar changed. Defaults to `requestRender`. */
+	requestScrollRender?: () => void;
+	/**
+	 * Cache to carry across frames. Pass the same map every frame and let `contentDirty` clear it:
+	 * a scroll-only frame then reuses every component's previous render instead of
+	 * re-materializing the whole transcript. Omit for a fresh per-frame cache (the old behaviour).
+	 */
+	renderCache?: Map<Component, Map<number, string[]>>;
+	/** Clear `renderCache` before this pass. Defaults to true. */
+	contentDirty?: boolean;
+}
+
 export function renderLayoutFrame(
 	root: Component,
 	width: number,
 	height: number,
 	requestRender: () => void,
+	options: RenderLayoutFrameOptions = {},
 ): LayoutFrame {
 	const safeWidth = Math.max(1, Math.floor(width));
 	const safeHeight = Math.max(1, Math.floor(height));
+	const renderCache = options.renderCache ?? new Map<Component, Map<number, string[]>>();
+	if (options.contentDirty !== false) renderCache.clear();
 	const context: LayoutContext = {
 		viewport: { width: safeWidth, height: safeHeight },
-		renderCache: new Map(),
+		renderCache,
 		requestRender,
+		requestScrollRender: options.requestScrollRender ?? requestRender,
 		primaryScrollView: undefined,
 	};
 	const rootBox = layoutComponent(context, root, 0, 0, safeWidth, safeHeight, {

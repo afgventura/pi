@@ -415,7 +415,7 @@ export function compositeTuiLine(
 	return visibleWidth(result) <= totalWidth ? result : sliceByColumn(result, 0, totalWidth, true);
 }
 
-export type TuiMode = "regular" | "fullscreen";
+export type TuiMode = "regular" | "fullscreen" | "scrollback";
 
 export interface TuiStopOptions {
 	/** Leave renderer output in place for another TUI taking over the same terminal. */
@@ -475,6 +475,8 @@ export abstract class TuiBase extends Container implements TUI {
 	private immediateRenderScheduled = false;
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
+	/** True when a component's content changed and cached renders must be discarded. */
+	private contentDirty = true;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
 	private showHardwareCursor = false;
 	private clearOnShrink = false;
@@ -944,6 +946,7 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	renderNow(force = false): void {
+		this.contentDirty = true;
 		if (force) this.resetRenderState();
 		this.renderRequested = false;
 		this.cancelRenderTimer();
@@ -952,6 +955,7 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	requestRender(force = false): void {
+		this.contentDirty = true;
 		if (force) {
 			this.resetRenderState();
 			this.requestImmediateRender();
@@ -962,7 +966,32 @@ export abstract class TuiBase extends Container implements TUI {
 		process.nextTick(() => this.scheduleRender());
 	}
 
+	/**
+	 * Re-render because the scroll offset or a scrollbar changed, not because any component's
+	 * content did. Frame builders keep their cached component renders, so a scroll frame costs
+	 * the viewport instead of the whole transcript.
+	 *
+	 * Safe by construction: this only ever *skips* work. Any content change goes through
+	 * requestRender(), which marks the content dirty and forces a full rebuild on the next frame.
+	 */
+	protected requestScrollRender(): void {
+		if (this.renderRequested) return;
+		this.renderRequested = true;
+		process.nextTick(() => this.scheduleRender());
+	}
+
+	/** Read and clear the pending content-change flag. */
+	protected consumeContentDirty(): boolean {
+		const dirty = this.contentDirty;
+		this.contentDirty = false;
+		return dirty;
+	}
+
 	private requestImmediateRender(): void {
+		// Input changed something (the editor's text, at minimum), so cached component renders are
+		// no longer valid. This path deliberately skips requestRender() to bypass the throttle, so
+		// the dirty flag has to be set here too.
+		this.contentDirty = true;
 		this.cancelRenderTimer();
 		this.renderRequested = true;
 		if (this.immediateRenderScheduled) return;

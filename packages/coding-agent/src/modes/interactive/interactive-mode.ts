@@ -48,6 +48,8 @@ import {
 	type TUI,
 	TuiAltScreen,
 	TuiMainScreen,
+	TuiScrollback,
+	VStack,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import chalk from "chalk";
@@ -263,6 +265,18 @@ function isUsageSessionEntry(item: RenderSessionItem): item is Extract<SessionEn
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 
+/**
+ * How many of the most recent tool results keep their output preview when the transcript is
+ * re-rendered (resume, compaction rebuild, settings change). Everything older collapses to its
+ * call header and stays expandable.
+ *
+ * Why: tool output is nearly all of a long transcript. One measured 36 MB session held 5,204
+ * tool results; at ten preview lines each that is roughly 100k rendered lines, and regular TUI
+ * mode writes every one of them to the terminal on resume. Keeping the recent window preserves
+ * the useful case (see what the current work is doing) without paying for the history.
+ */
+const RECENT_TOOL_OUTPUT_KEPT = 20;
+
 function isDeadTerminalError(error: unknown): boolean {
 	if (!error || typeof error !== "object" || !("code" in error)) {
 		return false;
@@ -414,9 +428,12 @@ export interface InteractiveModeOptions {
 
 export class InteractiveMode {
 	private runtimeHost: AgentSessionRuntime;
-	private renderer: TuiMainScreen | TuiAltScreen;
+	private renderer: TuiMainScreen | TuiAltScreen | TuiScrollback;
 	private ui: TUI;
 	private mainScreenRenderState: TuiMainScreenRenderState | undefined;
+	/** Bottom viewport for the scrollback renderer, and its dock, built once per mount. */
+	private scrollbackViewportRoot: Component | undefined;
+	private scrollbackDock: Component | undefined;
 	private loadedResourcesContainer: Container;
 	private chatContainer: Container;
 	private documentContainer: Container;
@@ -824,11 +841,79 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new DynamicBorder());
 	}
 
-	private mountInteractiveTui(tui: TuiMainScreen | TuiAltScreen, components: readonly Component[]): void {
+	private mountInteractiveTui(
+		tui: TuiMainScreen | TuiAltScreen | TuiScrollback,
+		components: readonly Component[],
+	): void {
 		for (const component of components) tui.addChild(component);
 		if (TuiLayouts.isViewportTUI(tui)) {
 			if (!this.fullscreenLayoutRoot) throw new Error("Fullscreen layout is not initialized");
 			tui.setLayoutRoot(this.fullscreenLayoutRoot);
+		}
+		if (tui instanceof TuiScrollback) {
+			this.mountScrollbackViewport(tui);
+		}
+	}
+
+	/**
+	 * Build the bottom viewport for the scrollback renderer: the live tail plus the dock.
+	 *
+	 * Nothing else is in the tree. Finished content is moved out to the terminal's scrollback by
+	 * `drainChatToScrollback`, which is what keeps a frame O(viewport) instead of O(transcript).
+	 */
+	private mountScrollbackViewport(tui: TuiScrollback): void {
+		this.scrollbackDock = new VStack([
+			{ component: this.pendingMessagesContainer, basis: "auto", minSize: 0 },
+			{ component: this.statusContainer, basis: "auto", minSize: 0 },
+			{ component: this.widgetContainerAbove, basis: "auto", minSize: 0 },
+			{ component: this.editorContainer, basis: "auto", minSize: 3 },
+			{ component: this.widgetContainerBelow, basis: "auto", minSize: 0 },
+			{ component: this.footerContainer, basis: "auto", minSize: 1 },
+		]);
+		this.scrollbackViewportRoot = new VStack([
+			{ component: this.chatContainer, basis: "auto", minSize: 0 },
+			{ component: this.scrollbackDock, basis: "auto", minSize: 0 },
+		]);
+		tui.setBeforeRender(() => this.drainChatToScrollback());
+		tui.setViewport(this.scrollbackViewportRoot, Math.max(1, tui.terminal.rows - 1));
+	}
+
+	/**
+	 * Move finished chat items out of the tree and into the terminal's scrollback.
+	 *
+	 * Codex's viewport holds only the in-flight cell plus the dock, never the transcript (see
+	 * `ChatWidget::as_renderable` in codex-rs/tui/src/chatwidget.rs). Keeping a tail of the transcript
+	 * instead makes the viewport large and constantly changing height, and every height change
+	 * scrolls the region above it - which is how one startup pushed 420 blank rows into scrollback.
+	 *
+	 * Only children that can no longer change are committed. pi has no "item finished" event, so
+	 * liveness comes from what it does track: the streaming assistant message and tool calls still
+	 * waiting for a result. Committing by position instead wrote a message while it was still
+	 * streaming and then wrote the finished version again, so the transcript appeared twice with one
+	 * copy truncated - and a tool call could be frozen before its result arrived.
+	 *
+	 * Runs at the start of every frame rather than at each mutation site, so rebuild paths need no
+	 * special handling: they repopulate the container and this drains it again.
+	 */
+	private drainChatToScrollback(): void {
+		if (!(this.renderer instanceof TuiScrollback)) return;
+		const width = Math.max(1, this.renderer.terminal.columns);
+		const children = this.chatContainer.children;
+
+		const live = new Set<Component>(this.pendingTools.values());
+		if (this.streamingComponent) live.add(this.streamingComponent);
+
+		// Commit the leading run of children that are all final, and stop at the first one that is not.
+		let cut = 0;
+		while (cut < children.length && !live.has(children[cut] as Component)) cut++;
+		if (cut === 0) return;
+
+		const finished = children.slice(0, cut);
+		for (const child of finished) {
+			this.renderer.commit(child.render(width));
+		}
+		for (const child of finished) {
+			this.chatContainer.removeChild(child);
 		}
 	}
 
@@ -860,6 +945,14 @@ export class InteractiveMode {
 		previousUi.setFocus(null);
 		previousUi.clear();
 		if (TuiLayouts.isViewportTUI(previousUi)) previousUi.setLayoutRoot(undefined);
+		if (previousUi instanceof TuiScrollback) {
+			// Its transcript lives in the terminal's scrollback, not in the tree, so the next
+			// renderer has nothing to draw. Rebuild from the session entries first.
+			previousUi.setBeforeRender(undefined);
+			this.rebuildChatFromMessages();
+			this.scrollbackViewportRoot = undefined;
+			this.scrollbackDock = undefined;
+		}
 
 		const nextUi = createInteractiveTui({
 			tuiMode: mode,
@@ -3856,6 +3949,24 @@ export class InteractiveMode {
 			? collectCacheMisses(this.sessionManager.getEntries(), this.session.modelRuntime)
 			: new Map<AssistantMessage, CacheMiss>();
 
+		// Tool output dominates a re-rendered transcript, so only the most recent results keep
+		// their preview. Collect the call ids in render order and mark the older ones historical.
+		const toolCallIds: string[] = [];
+		for (const item of items) {
+			if (isCustomSessionEntry(item) || isUsageSessionEntry(item) || isCompactionCostNotice(item)) {
+				continue;
+			}
+			if (item.role !== "assistant") continue;
+			for (const content of item.content) {
+				if (content.type === "toolCall") {
+					toolCallIds.push(content.id);
+				}
+			}
+		}
+		const historicalToolCalls = new Set(
+			toolCallIds.slice(0, Math.max(0, toolCallIds.length - RECENT_TOOL_OUTPUT_KEPT)),
+		);
+
 		if (options.updateFooter) {
 			this.footer.invalidate();
 			this.updateEditorBorderColor();
@@ -3895,6 +4006,7 @@ export class InteractiveMode {
 							this.sessionManager.getCwd(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
+						component.setHistorical(historicalToolCalls.has(content.id));
 						this.chatContainer.addChild(component);
 
 						if (message.stopReason === "aborted" || message.stopReason === "error") {
@@ -3947,6 +4059,13 @@ export class InteractiveMode {
 		entries: SessionEntry[],
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
+		// Every rebuild re-creates each item from the session entries. In scrollback mode the
+		// previous copy is already in the terminal's history, so it has to be discarded first or the
+		// transcript ends up written twice - which is what a startup did, because session start
+		// rebuilds the chat after the initial load.
+		if (this.renderer instanceof TuiScrollback) {
+			this.renderer.resetScrollback();
+		}
 		const items = entries.flatMap((entry): RenderSessionItem[] => {
 			if (entry.type === "custom" || (entry.type === "usage" && entry.kind === "cache_warm")) {
 				return [entry];

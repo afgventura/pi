@@ -59,6 +59,7 @@ export class ToolExecutionComponent extends Container {
 	private toolCallId: string;
 	private args: any;
 	private expanded = false;
+	private historical = false;
 	private showImages: boolean;
 	private imageWidthCells: number;
 	private isPartial = true;
@@ -246,6 +247,15 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
+	/**
+	 * Mark this result as restored from earlier in the session. Historical results render a
+	 * summary instead of their output until the user expands them; live results are unaffected.
+	 */
+	setHistorical(historical: boolean): void {
+		this.historical = historical;
+		this.updateDisplay();
+	}
+
 	setShowImages(show: boolean): void {
 		this.showImages = show;
 		this.updateDisplay();
@@ -337,7 +347,11 @@ export class ToolExecutionComponent extends Container {
 				}
 			}
 
-			if (this.result) {
+			if (this.result && this.historical && !this.expanded) {
+				// A historical result renders nothing of its own: the call header above it already says
+				// what ran, and one "N lines hidden" line per tool result turns a long transcript into a
+				// wall of near-identical lines. The result is still held, so expanding reveals it.
+			} else if (this.result) {
 				const resultRenderer = this.getResultRenderer();
 				if (!resultRenderer) {
 					const component = this.createResultFallback();
@@ -368,7 +382,7 @@ export class ToolExecutionComponent extends Container {
 			}
 		} else {
 			this.contentText.setCustomBgFn(bgFn);
-			this.contentText.setText(this.formatToolExecution());
+			this.contentText.setText(this.formatToolExecution(this.historical && !this.expanded));
 			hasContent = true;
 		}
 
@@ -418,11 +432,14 @@ export class ToolExecutionComponent extends Container {
 		return getRenderedTextOutput(this.result, this.showImages);
 	}
 
-	private formatToolExecution(): string {
+	private formatToolExecution(hideOutput = false): string {
 		let text = theme.fg("toolTitle", theme.bold(this.toolName));
 		const content = JSON.stringify(this.args, null, 2);
 		if (content) {
 			text += `\n\n${content}`;
+		}
+		if (hideOutput) {
+			return text;
 		}
 		const output = this.getTextOutput();
 		if (output) {
