@@ -881,49 +881,30 @@ export class InteractiveMode {
 	/**
 	 * Move finished chat items out of the tree and into the terminal's scrollback.
 	 *
-	 * Runs at the start of every frame rather than at each mutation site: the chat container is
-	 * populated exactly as it always was, and this drains whatever no longer fits above the dock.
-	 * Rebuild paths need no special handling as a result - they repopulate the container and this
-	 * drains it again.
+	 * Everything except the newest item is committed. Codex does the same: its viewport holds only
+	 * the in-flight cell plus the dock, never the transcript (see `ChatWidget::as_renderable` in
+	 * codex-rs/tui/src/chatwidget.rs). Keeping a tail of the transcript instead makes the viewport
+	 * large and constantly changing height, and every height change scrolls the region above it -
+	 * which is how one startup pushed 420 blank rows into scrollback.
 	 *
-	 * Once a line is committed the renderer cannot change or remove it, so the drained components
-	 * are kept for nothing but release; anything still visible stays in the tree.
+	 * Runs at the start of every frame rather than at each mutation site, so rebuild paths need no
+	 * special handling: they repopulate the container and this drains it again.
+	 *
+	 * Once a line is committed the renderer cannot change or remove it, so an item that is still
+	 * mutating has to stay in the tree - hence the single-item window.
 	 */
 	private drainChatToScrollback(): void {
-		if (!(this.renderer instanceof TuiScrollback) || !this.scrollbackDock) return;
+		if (!(this.renderer instanceof TuiScrollback)) return;
 		const width = Math.max(1, this.renderer.terminal.columns);
-		const rows = Math.max(1, this.renderer.terminal.rows);
-		const budget = Math.max(0, rows - 1 - this.scrollbackDock.render(width).length);
-
 		const children = this.chatContainer.children;
-		if (children.length === 0) return;
+		const finished = children.slice(0, Math.max(0, children.length - 1));
+		if (finished.length === 0) return;
 
-		// Render each child once and keep the lines, rather than re-rendering the whole container per
-		// removal - that would be quadratic in the number of drained items.
-		const rendered: string[][] = [];
-		let total = 0;
-		for (const child of children) {
-			const lines = child.render(width);
-			rendered.push(lines);
-			total += lines.length;
+		// Commit oldest-first so scrollback order matches reading order, then drop them from the tree.
+		for (const child of finished) {
+			this.renderer.commit(child.render(width), false);
 		}
-
-		let remove = 0;
-		while (remove < children.length && total > budget) {
-			total -= rendered[remove]?.length ?? 0;
-			remove++;
-		}
-		if (remove === 0) return;
-
-		// Commit oldest-first so scrollback order matches reading order, then drop them from the
-		// tree. Once committed the renderer cannot change or remove these lines.
-		for (let index = 0; index < remove; index++) {
-			const lines = rendered[index];
-			if (lines) this.renderer.commit(lines, false);
-		}
-		for (let index = 0; index < remove; index++) {
-			const child = children[0];
-			if (!child) break;
+		for (const child of finished) {
 			this.chatContainer.removeChild(child);
 		}
 	}
