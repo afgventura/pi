@@ -23,8 +23,32 @@ function normalizeWhitespaceLower(text: string): string {
 	return text.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-function getSessionSearchText(session: SessionInfo): string {
-	return `${session.id} ${session.name ?? ""} ${session.allMessagesText} ${session.cwd}`;
+/**
+ * Derived search text for one session, built once and reused. Building it concatenates the
+ * session's entire message text, and `matchSession` runs for every session on every keystroke,
+ * so recomputing it per key re-copies megabytes per session. A SessionInfo is immutable once
+ * listed, so a WeakMap keyed on the object is enough and nothing needs invalidating.
+ */
+interface SessionSearchText {
+	raw: string;
+	/** Lazily built: only queries containing a phrase token need it. */
+	normalized?: string;
+}
+
+const searchTextBySession = new WeakMap<SessionInfo, SessionSearchText>();
+
+function getSessionSearchText(session: SessionInfo): SessionSearchText {
+	let cached = searchTextBySession.get(session);
+	if (cached === undefined) {
+		cached = { raw: `${session.id} ${session.name ?? ""} ${session.allMessagesText} ${session.cwd}` };
+		searchTextBySession.set(session, cached);
+	}
+	return cached;
+}
+
+function getNormalizedSearchText(cached: SessionSearchText): string {
+	if (cached.normalized === undefined) cached.normalized = normalizeWhitespaceLower(cached.raw);
+	return cached.normalized;
 }
 
 export function hasSessionName(session: SessionInfo): boolean {
@@ -114,7 +138,8 @@ export function parseSearchQuery(query: string): ParsedSearchQuery {
 }
 
 export function matchSession(session: SessionInfo, parsed: ParsedSearchQuery): MatchResult {
-	const text = getSessionSearchText(session);
+	const cached = getSessionSearchText(session);
+	const text = cached.raw;
 
 	if (parsed.mode === "regex") {
 		if (!parsed.regex) {
@@ -130,13 +155,10 @@ export function matchSession(session: SessionInfo, parsed: ParsedSearchQuery): M
 	}
 
 	let totalScore = 0;
-	let normalizedText: string | null = null;
 
 	for (const token of parsed.tokens) {
 		if (token.kind === "phrase") {
-			if (normalizedText === null) {
-				normalizedText = normalizeWhitespaceLower(text);
-			}
+			const normalizedText = getNormalizedSearchText(cached);
 			const phrase = normalizeWhitespaceLower(token.value);
 			if (!phrase) continue;
 			const idx = normalizedText.indexOf(phrase);
