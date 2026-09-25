@@ -1263,6 +1263,7 @@ export class SettingsManager {
 	}
 
 	getTuiMode(): TuiMode {
+		if (this.settings.tuiMode === "scrollback") return "scrollback";
 		return this.settings.tuiMode === "fullscreen" ? "fullscreen" : "regular";
 	}
 

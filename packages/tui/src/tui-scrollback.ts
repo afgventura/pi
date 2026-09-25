@@ -1,4 +1,3 @@
-import type { Terminal } from "./terminal.ts";
 import { type Component, type TUI, TuiBase } from "./tui.ts";
 import { BoundedTerminalWriter } from "./tui-main-screen.ts";
 
@@ -15,45 +14,59 @@ import { BoundedTerminalWriter } from "./tui-main-screen.ts";
  * How it works. The screen is split into two regions:
  *
  *     row 0
- *      ├─ scroll region (rows 1 .. viewportTop)   committed content, owned by the terminal
- *      └─ viewport       (rows viewportTop+1 ..)  owned by this renderer, diffed each frame
+ *      |-- scroll region (rows 1 .. viewportTop)   committed content, owned by the terminal
+ *      `-- viewport       (viewportTop+1 ..)       owned by this renderer, diffed each frame
  *
  * `commit()` restricts the terminal's scroll region to the rows above the viewport and writes the
- * finished lines there. Because only that region is scrollable, each newline pushes the oldest
- * committed line into the terminal's scrollback and leaves the viewport untouched. Scrollback is
- * then the terminal's problem - Ghostty renders it on the GPU - so scrolling back through history
- * costs this process nothing at all.
+ * finished lines there. Because only that region scrolls, each newline pushes the oldest committed
+ * line into the terminal's scrollback and leaves the viewport untouched. Scrollback is then the
+ * terminal's problem - Ghostty renders it on the GPU - so scrolling back through history costs
+ * this process nothing at all.
  *
- * Per-frame cost is therefore O(viewport) regardless of how long the session is, and history is
- * still scrollable. That is the combination neither existing mode gives: `regular` has terminal
- * scrollback but no pinned bottom region, `fullscreen` has the pinned region but pays O(transcript).
+ * The viewport is sized from its content each frame, capped by `setViewport`'s row budget and by
+ * the screen. Growing it takes rows away from the scroll region, so those rows are scrolled into
+ * scrollback first; without that, committed lines that had not yet left the screen would be
+ * overwritten and lost.
  */
 export class TuiScrollback extends TuiBase implements TUI {
 	readonly mode = "scrollback" as const;
 
 	private viewportComponent: Component | undefined;
+	/** Upper bound on viewport rows, from the last `setViewport`. */
+	private maxViewportRows = 0;
+	/** Rows the viewport currently occupies. */
 	private viewportHeight = 0;
 	private previousViewportLines: string[] = [];
 	private previousWidth = 0;
 	/** 0-based row where the viewport starts. Everything above it belongs to the terminal. */
 	private viewportTop = 0;
-	/** Whether the viewport region has been placed at the bottom of the screen yet. */
-	private viewportPlaced = false;
+	private beforeRender: (() => void) | undefined;
 
-	/** Rows this renderer owns at the bottom of the screen. */
+	/** Rows this renderer currently owns at the bottom of the screen. */
 	get viewportRows(): number {
 		return this.viewportHeight;
 	}
 
 	/**
-	 * Set the component drawn in the bottom region, and how many rows it may use.
+	 * Called at the start of every frame, before the viewport is measured.
 	 *
-	 * The viewport is repainted from scratch, because a height change moves every row in it.
+	 * The presentation uses this to move finished content out of its component tree and into
+	 * scrollback, which is what keeps a frame O(viewport). Running it here rather than at each
+	 * mutation site means the presentation does not need a call on every path that changes content.
 	 */
-	setViewport(component: Component | undefined, height: number): void {
+	setBeforeRender(callback: (() => void) | undefined): void {
+		this.beforeRender = callback;
+	}
+
+	/**
+	 * Set the component drawn in the bottom region, and the maximum rows it may use.
+	 *
+	 * The actual height is measured from the component every frame and clamped to `maxRows`, so a
+	 * caller can pass the live tail plus its dock and let the viewport grow and shrink with it.
+	 */
+	setViewport(component: Component | undefined, maxRows: number): void {
 		this.viewportComponent = component;
-		this.viewportHeight = Math.max(0, Math.floor(height));
-		this.viewportPlaced = false;
+		this.maxViewportRows = Math.max(0, Math.floor(maxRows));
 		this.previousViewportLines = [];
 		this.requestRender(true);
 	}
@@ -64,9 +77,8 @@ export class TuiScrollback extends TuiBase implements TUI {
 	 * The caller is responsible for not committing content it still needs to update: once a line
 	 * is in the terminal's scrollback this renderer can no longer change or remove it.
 	 */
-	commit(lines: readonly string[]): void {
+	commit(lines: readonly string[], requestRepaint = true): void {
 		if (lines.length === 0 || this.stopped) return;
-		this.placeViewport();
 		if (this.viewportTop === 0) {
 			// No room above the viewport: nothing can scroll, so drop the lines rather than
 			// overwrite the viewport.
@@ -91,18 +103,27 @@ export class TuiScrollback extends TuiBase implements TUI {
 
 		// The viewport content did not change, but the cursor is now in the scroll region. Repaint
 		// so it returns to the viewport; the diff makes that a cursor move and nothing else.
-		this.requestRender(true);
+		// A caller committing from inside a frame (see setBeforeRender) is about to paint the
+		// viewport anyway, so it can skip this.
+		if (requestRepaint) this.requestRender(true);
 	}
 
 	protected doRender(): void {
 		if (this.stopped) return;
+		this.beforeRender?.();
 		const width = Math.max(1, this.terminal.columns);
-		this.placeViewport();
+		const rows = Math.max(1, this.terminal.rows);
 
 		const rendered = this.viewportComponent ? this.viewportComponent.render(width) : [];
+		const desired = Math.min(rendered.length, this.maxViewportRows, Math.max(0, rows - 1));
+		this.resizeViewport(rows, desired);
+
+		// Follow the end: a live tail taller than the viewport shows its newest lines, which are the
+		// ones the user is watching.
+		const offset = Math.max(0, rendered.length - this.viewportHeight);
 		let viewportLines: string[] = [];
 		for (let row = 0; row < this.viewportHeight; row++) {
-			viewportLines.push(rendered[row] ?? "");
+			viewportLines.push(rendered[offset + row] ?? "");
 		}
 		if (this.hasOverlayEntries) {
 			viewportLines = this.compositeOverlays(viewportLines, width, this.viewportHeight);
@@ -131,23 +152,27 @@ export class TuiScrollback extends TuiBase implements TUI {
 	}
 
 	/**
-	 * Put the cursor on the viewport's first row, scrolling the screen down so the viewport sits at
-	 * the bottom. Done once per viewport placement: after this the viewport is anchored and
-	 * `commit()` streams into the rows above it.
+	 * Move the viewport's top edge and repaint it.
+	 *
+	 * Growing the viewport takes rows that the scroll region was using. Those rows may hold
+	 * committed lines that have not scrolled off yet, so scroll the region up by the same amount
+	 * first: the lines leave for scrollback instead of being painted over.
 	 */
-	private placeViewport(): void {
-		const rows = Math.max(1, this.terminal.rows);
-		this.viewportTop = Math.max(0, rows - this.viewportHeight);
-		if (this.viewportPlaced) return;
-		this.viewportPlaced = true;
-		this.previousViewportLines = [];
-		// The cursor starts at the top of a blank screen. Scrolling it down by viewportTop rows
-		// leaves the cursor exactly at the top of the viewport region.
-		if (this.viewportTop > 0) {
-			this.terminal.write("\n".repeat(this.viewportTop));
+	private resizeViewport(rows: number, desired: number): void {
+		const grow = desired - this.viewportHeight;
+		if (grow > 0 && this.viewportTop > 0) {
+			const scroll = Math.min(grow, this.viewportTop);
+			const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
+			output.append("\x1b[?2026h");
+			output.append(`\x1b[1;${this.viewportTop}r`);
+			output.append(`\x1b[${this.viewportTop};1H`);
+			for (let i = 0; i < scroll; i++) output.append("\r\n");
+			output.append("\x1b[r");
+			output.append("\x1b[?2026l");
+			output.flush();
 		}
+		this.viewportHeight = desired;
+		this.viewportTop = Math.max(0, rows - desired);
+		if (grow !== 0) this.previousViewportLines = [];
 	}
 }
-
-/** Re-exported so callers can construct a scrollback renderer without reaching into the class. */
-export type TuiScrollbackTerminal = Terminal;

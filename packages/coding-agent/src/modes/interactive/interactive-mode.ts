@@ -48,6 +48,8 @@ import {
 	type TUI,
 	TuiAltScreen,
 	TuiMainScreen,
+	TuiScrollback,
+	VStack,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import chalk from "chalk";
@@ -426,9 +428,12 @@ export interface InteractiveModeOptions {
 
 export class InteractiveMode {
 	private runtimeHost: AgentSessionRuntime;
-	private renderer: TuiMainScreen | TuiAltScreen;
+	private renderer: TuiMainScreen | TuiAltScreen | TuiScrollback;
 	private ui: TUI;
 	private mainScreenRenderState: TuiMainScreenRenderState | undefined;
+	/** Bottom viewport for the scrollback renderer, and its dock, built once per mount. */
+	private scrollbackViewportRoot: Component | undefined;
+	private scrollbackDock: Component | undefined;
 	private loadedResourcesContainer: Container;
 	private chatContainer: Container;
 	private documentContainer: Container;
@@ -836,11 +841,90 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new DynamicBorder());
 	}
 
-	private mountInteractiveTui(tui: TuiMainScreen | TuiAltScreen, components: readonly Component[]): void {
+	private mountInteractiveTui(
+		tui: TuiMainScreen | TuiAltScreen | TuiScrollback,
+		components: readonly Component[],
+	): void {
 		for (const component of components) tui.addChild(component);
 		if (TuiLayouts.isViewportTUI(tui)) {
 			if (!this.fullscreenLayoutRoot) throw new Error("Fullscreen layout is not initialized");
 			tui.setLayoutRoot(this.fullscreenLayoutRoot);
+		}
+		if (tui instanceof TuiScrollback) {
+			this.mountScrollbackViewport(tui);
+		}
+	}
+
+	/**
+	 * Build the bottom viewport for the scrollback renderer: the live tail plus the dock.
+	 *
+	 * Nothing else is in the tree. Finished content is moved out to the terminal's scrollback by
+	 * `drainChatToScrollback`, which is what keeps a frame O(viewport) instead of O(transcript).
+	 */
+	private mountScrollbackViewport(tui: TuiScrollback): void {
+		this.scrollbackDock = new VStack([
+			{ component: this.pendingMessagesContainer, basis: "auto", minSize: 0 },
+			{ component: this.statusContainer, basis: "auto", minSize: 0 },
+			{ component: this.widgetContainerAbove, basis: "auto", minSize: 0 },
+			{ component: this.editorContainer, basis: "auto", minSize: 3 },
+			{ component: this.widgetContainerBelow, basis: "auto", minSize: 0 },
+			{ component: this.footerContainer, basis: "auto", minSize: 1 },
+		]);
+		this.scrollbackViewportRoot = new VStack([
+			{ component: this.chatContainer, basis: "auto", minSize: 0 },
+			{ component: this.scrollbackDock, basis: "auto", minSize: 0 },
+		]);
+		tui.setBeforeRender(() => this.drainChatToScrollback());
+		tui.setViewport(this.scrollbackViewportRoot, Math.max(1, tui.terminal.rows - 1));
+	}
+
+	/**
+	 * Move finished chat items out of the tree and into the terminal's scrollback.
+	 *
+	 * Runs at the start of every frame rather than at each mutation site: the chat container is
+	 * populated exactly as it always was, and this drains whatever no longer fits above the dock.
+	 * Rebuild paths need no special handling as a result - they repopulate the container and this
+	 * drains it again.
+	 *
+	 * Once a line is committed the renderer cannot change or remove it, so the drained components
+	 * are kept for nothing but release; anything still visible stays in the tree.
+	 */
+	private drainChatToScrollback(): void {
+		if (!(this.renderer instanceof TuiScrollback) || !this.scrollbackDock) return;
+		const width = Math.max(1, this.renderer.terminal.columns);
+		const rows = Math.max(1, this.renderer.terminal.rows);
+		const budget = Math.max(0, rows - 1 - this.scrollbackDock.render(width).length);
+
+		const children = this.chatContainer.children;
+		if (children.length === 0) return;
+
+		// Render each child once and keep the lines, rather than re-rendering the whole container per
+		// removal - that would be quadratic in the number of drained items.
+		const rendered: string[][] = [];
+		let total = 0;
+		for (const child of children) {
+			const lines = child.render(width);
+			rendered.push(lines);
+			total += lines.length;
+		}
+
+		let remove = 0;
+		while (remove < children.length && total > budget) {
+			total -= rendered[remove]?.length ?? 0;
+			remove++;
+		}
+		if (remove === 0) return;
+
+		// Commit oldest-first so scrollback order matches reading order, then drop them from the
+		// tree. Once committed the renderer cannot change or remove these lines.
+		for (let index = 0; index < remove; index++) {
+			const lines = rendered[index];
+			if (lines) this.renderer.commit(lines, false);
+		}
+		for (let index = 0; index < remove; index++) {
+			const child = children[0];
+			if (!child) break;
+			this.chatContainer.removeChild(child);
 		}
 	}
 
@@ -872,6 +956,14 @@ export class InteractiveMode {
 		previousUi.setFocus(null);
 		previousUi.clear();
 		if (TuiLayouts.isViewportTUI(previousUi)) previousUi.setLayoutRoot(undefined);
+		if (previousUi instanceof TuiScrollback) {
+			// Its transcript lives in the terminal's scrollback, not in the tree, so the next
+			// renderer has nothing to draw. Rebuild from the session entries first.
+			previousUi.setBeforeRender(undefined);
+			this.rebuildChatFromMessages();
+			this.scrollbackViewportRoot = undefined;
+			this.scrollbackDock = undefined;
+		}
 
 		const nextUi = createInteractiveTui({
 			tuiMode: mode,

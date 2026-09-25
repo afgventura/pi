@@ -1,5 +1,12 @@
 import type { Terminal } from "@earendil-works/pi-tui";
-import { ProcessTerminal, type TUI, TuiAltScreen, TuiMainScreen, type TuiMode } from "@earendil-works/pi-tui";
+import {
+	ProcessTerminal,
+	type TUI,
+	TuiAltScreen,
+	TuiMainScreen,
+	type TuiMode,
+	TuiScrollback,
+} from "@earendil-works/pi-tui";
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { keyDisplayText } from "./components/keybinding-hints.ts";
@@ -7,9 +14,8 @@ import { theme } from "./theme/theme.ts";
 
 export interface InteractiveTuiOptions {
 	/**
-	 * Renderer to build. `"scrollback"` exists in pi-tui but is not wired into this presentation
-	 * yet, so anything that is not `"fullscreen"` falls back to the regular renderer. Settings
-	 * coerce unknown values the same way in `SettingsManager.getTuiMode()`.
+	 * Renderer to build. `"scrollback"` owns only a bottom viewport and streams finished content
+	 * into the terminal's scrollback, so a frame costs the viewport rather than the transcript.
 	 */
 	readonly tuiMode: TuiMode;
 	readonly showHardwareCursor: boolean;
@@ -20,11 +26,11 @@ export interface InteractiveTuiOptions {
 }
 
 /** Composition root shared by coding-agent presentations. */
-export function createInteractiveTui(options: InteractiveTuiOptions & { readonly tuiMode: "fullscreen" }): TuiAltScreen;
-export function createInteractiveTui(options: InteractiveTuiOptions & { readonly tuiMode: "regular" }): TuiMainScreen;
-export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScreen | TuiAltScreen;
-export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScreen | TuiAltScreen {
+export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScreen | TuiAltScreen | TuiScrollback {
 	const terminal = options.terminal ?? new ProcessTerminal();
+	if (options.tuiMode === "scrollback") {
+		return new TuiScrollback(terminal, options.showHardwareCursor, options.logDirectory);
+	}
 	if (options.tuiMode === "fullscreen") {
 		const styleSearchMatch = (text: string) => theme.bg("searchMatchBg", theme.fg("searchMatchText", text));
 		return new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, {
