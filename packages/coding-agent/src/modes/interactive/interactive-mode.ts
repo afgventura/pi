@@ -277,16 +277,6 @@ const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
  */
 const RECENT_TOOL_OUTPUT_KEPT = 20;
 
-/**
- * How many trailing chat children stay out of scrollback so a logical item is never split.
- *
- * A logical item is several children: 56 of the 94 add sites push a Spacer plus a component, and
- * the version notification pushes about five. Committing down to a single child cut those groups in
- * half. Six covers the largest group observed and keeps the newest items mutable, which matters
- * because a committed line can never be changed or removed.
- */
-const SCROLLBACK_LIVE_CHILDREN = 6;
-
 function isDeadTerminalError(error: unknown): boolean {
 	if (!error || typeof error !== "object" || !("code" in error)) {
 		return false;
@@ -896,10 +886,11 @@ export class InteractiveMode {
 	 * instead makes the viewport large and constantly changing height, and every height change
 	 * scrolls the region above it - which is how one startup pushed 420 blank rows into scrollback.
 	 *
-	 * A logical item is not one child: 56 of the 94 add sites push a Spacer plus a component, and the
-	 * version notification pushes about five. Committing down to a single child split those groups and
-	 * wrote half an item, so a trailing window of children is kept instead. That also keeps the newest
-	 * items mutable, which matters because a committed line can never be changed or removed.
+	 * Only children that can no longer change are committed. pi has no "item finished" event, so
+	 * liveness comes from what it does track: the streaming assistant message and tool calls still
+	 * waiting for a result. Committing by position instead wrote a message while it was still
+	 * streaming and then wrote the finished version again, so the transcript appeared twice with one
+	 * copy truncated - and a tool call could be frozen before its result arrived.
 	 *
 	 * Runs at the start of every frame rather than at each mutation site, so rebuild paths need no
 	 * special handling: they repopulate the container and this drains it again.
@@ -908,10 +899,16 @@ export class InteractiveMode {
 		if (!(this.renderer instanceof TuiScrollback)) return;
 		const width = Math.max(1, this.renderer.terminal.columns);
 		const children = this.chatContainer.children;
-		const finished = children.slice(0, Math.max(0, children.length - SCROLLBACK_LIVE_CHILDREN));
-		if (finished.length === 0) return;
 
-		// Commit oldest-first so scrollback order matches reading order, then drop them from the tree.
+		const live = new Set<Component>(this.pendingTools.values());
+		if (this.streamingComponent) live.add(this.streamingComponent);
+
+		// Commit the leading run of children that are all final, and stop at the first one that is not.
+		let cut = 0;
+		while (cut < children.length && !live.has(children[cut] as Component)) cut++;
+		if (cut === 0) return;
+
+		const finished = children.slice(0, cut);
 		for (const child of finished) {
 			this.renderer.commit(child.render(width), false);
 		}
