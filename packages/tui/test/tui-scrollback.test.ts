@@ -77,7 +77,7 @@ describe("scrollback renderer", () => {
 		tui.stop();
 	});
 
-	it("scrolls the oldest committed lines into the terminal's scrollback", async () => {
+	it("shows committed lines above the viewport and scrolls older ones off", async () => {
 		const viewport = new Lines();
 		viewport.lines = ["EDITOR"];
 		const { terminal, tui } = create(2, viewport);
@@ -89,18 +89,13 @@ describe("scrollback renderer", () => {
 		await terminal.flush();
 
 		const screen = terminal.getViewport();
-		const scrollback = terminal.getScrollBuffer();
-
+		// The viewport never moves.
 		assert.strictEqual(screen[ROWS - 1], "EDITOR");
-		assert.ok(scrollback.length > ROWS, `expected scrollback to grow, got ${scrollback.length} rows`);
-		assert.ok(
-			scrollback.some((line) => line === "line 0"),
-			"expected the first committed line to be retained in scrollback",
-		);
-		assert.ok(
-			screen.some((line) => line === "line 19"),
-			"expected the newest committed line to be visible",
-		);
+		// The newest committed line sits directly above it.
+		assert.strictEqual(screen[ROWS - 2], "line 19");
+		// The alternate screen has no scrollback, so the oldest lines are gone for good - which is
+		// the trade codex makes too, and why it has a Ctrl+T transcript pager.
+		assert.ok(!screen.some((line) => line === "line 0"), "oldest lines should have scrolled off");
 
 		tui.stop();
 	});
@@ -147,7 +142,7 @@ describe("scrollback renderer", () => {
 	// Rebuild paths re-create every item from the session entries. Without discarding the previous
 	// copy first, the transcript is committed twice - which is what a startup did, because session
 	// start rebuilds the chat after the initial load.
-	it("discards committed history on reset so a rebuild replaces rather than doubles it", async () => {
+	it("clears the screen on reset so a rebuild replaces rather than doubles it", async () => {
 		const viewport = new Lines();
 		viewport.lines = ["EDITOR"];
 		const { terminal, tui } = create(ROWS - 1, viewport);
@@ -157,13 +152,19 @@ describe("scrollback renderer", () => {
 			tui.commit([`line ${i}`]);
 		}
 		await terminal.flush();
-		assert.ok(terminal.getScrollBuffer().length > ROWS, "expected history before the reset");
+		assert.ok(
+			terminal.getViewport().some((line) => line.startsWith("line ")),
+			"expected committed lines on screen before the reset",
+		);
 
 		tui.resetScrollback();
 		tui.renderNow(); // the clear is deferred to the next frame, so that it lands with the repaint
 		await terminal.flush();
 
-		assert.strictEqual(terminal.getScrollBuffer().length, ROWS, "history should be gone after a reset");
+		assert.ok(
+			!terminal.getViewport().some((line) => line.startsWith("line ")),
+			"committed lines should be gone after a reset, or a rebuild would write them twice",
+		);
 		tui.stop();
 	});
 

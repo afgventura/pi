@@ -31,6 +31,31 @@ import { BoundedTerminalWriter } from "./tui-main-screen.ts";
 export class TuiScrollback extends TuiBase implements TUI {
 	readonly mode = "scrollback" as const;
 
+	/**
+	 * Run in the alternate screen, the way codex does by default.
+	 *
+	 * Not cosmetic. tmux's default wheel binding is:
+	 *
+	 *   WheelUpPane -> if-shell -F "#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}" \
+	 *       { send-keys -M } { copy-mode -e }
+	 *
+	 * On the main screen none of those flags hold, so the wheel opens copy-mode and copy-mode owns
+	 * the keyboard: typing after a scroll goes to tmux rather than to the application. In the
+	 * alternate screen `alternate_on` is true, so the wheel is forwarded to the application instead.
+	 * This renderer ignores mouse input, so the wheel does nothing and the keyboard always reaches
+	 * the input - which is how codex's default mode behaves, and why it feels smooth.
+	 *
+	 * The cost, shared with codex: the alternate screen has no scrollback, so committed lines are
+	 * gone once they scroll off. codex answers that with its Ctrl+T transcript pager.
+	 */
+	protected override beforeTerminalStart(): void {
+		this.terminal.write("\x1b[?1049h");
+	}
+
+	protected override beforeTerminalStop(): void {
+		this.terminal.write("\x1b[?1049l");
+	}
+
 	private viewportComponent: Component | undefined;
 	/** Upper bound on viewport rows, from the last `setViewport`. */
 	private maxViewportRows = 0;
