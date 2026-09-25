@@ -277,6 +277,16 @@ const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
  */
 const RECENT_TOOL_OUTPUT_KEPT = 20;
 
+/**
+ * How many trailing chat children stay out of scrollback so a logical item is never split.
+ *
+ * A logical item is several children: 56 of the 94 add sites push a Spacer plus a component, and
+ * the version notification pushes about five. Committing down to a single child cut those groups in
+ * half. Six covers the largest group observed and keeps the newest items mutable, which matters
+ * because a committed line can never be changed or removed.
+ */
+const SCROLLBACK_LIVE_CHILDREN = 6;
+
 function isDeadTerminalError(error: unknown): boolean {
 	if (!error || typeof error !== "object" || !("code" in error)) {
 		return false;
@@ -881,23 +891,24 @@ export class InteractiveMode {
 	/**
 	 * Move finished chat items out of the tree and into the terminal's scrollback.
 	 *
-	 * Everything except the newest item is committed. Codex does the same: its viewport holds only
-	 * the in-flight cell plus the dock, never the transcript (see `ChatWidget::as_renderable` in
-	 * codex-rs/tui/src/chatwidget.rs). Keeping a tail of the transcript instead makes the viewport
-	 * large and constantly changing height, and every height change scrolls the region above it -
-	 * which is how one startup pushed 420 blank rows into scrollback.
+	 * Codex's viewport holds only the in-flight cell plus the dock, never the transcript (see
+	 * `ChatWidget::as_renderable` in codex-rs/tui/src/chatwidget.rs). Keeping a tail of the transcript
+	 * instead makes the viewport large and constantly changing height, and every height change
+	 * scrolls the region above it - which is how one startup pushed 420 blank rows into scrollback.
+	 *
+	 * A logical item is not one child: 56 of the 94 add sites push a Spacer plus a component, and the
+	 * version notification pushes about five. Committing down to a single child split those groups and
+	 * wrote half an item, so a trailing window of children is kept instead. That also keeps the newest
+	 * items mutable, which matters because a committed line can never be changed or removed.
 	 *
 	 * Runs at the start of every frame rather than at each mutation site, so rebuild paths need no
 	 * special handling: they repopulate the container and this drains it again.
-	 *
-	 * Once a line is committed the renderer cannot change or remove it, so an item that is still
-	 * mutating has to stay in the tree - hence the single-item window.
 	 */
 	private drainChatToScrollback(): void {
 		if (!(this.renderer instanceof TuiScrollback)) return;
 		const width = Math.max(1, this.renderer.terminal.columns);
 		const children = this.chatContainer.children;
-		const finished = children.slice(0, Math.max(0, children.length - 1));
+		const finished = children.slice(0, Math.max(0, children.length - SCROLLBACK_LIVE_CHILDREN));
 		if (finished.length === 0) return;
 
 		// Commit oldest-first so scrollback order matches reading order, then drop them from the tree.
