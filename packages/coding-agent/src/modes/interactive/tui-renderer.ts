@@ -1,12 +1,17 @@
 import type { Terminal } from "@earendil-works/pi-tui";
-import { ProcessTerminal, type TUI, TuiAltScreen, TuiMainScreen } from "@earendil-works/pi-tui";
+import { ProcessTerminal, type TUI, TuiAltScreen, TuiMainScreen, type TuiMode } from "@earendil-works/pi-tui";
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { keyDisplayText } from "./components/keybinding-hints.ts";
 import { theme } from "./theme/theme.ts";
 
 export interface InteractiveTuiOptions {
-	readonly tuiMode: "regular" | "fullscreen";
+	/**
+	 * Renderer to build. `"scrollback"` exists in pi-tui but is not wired into this presentation
+	 * yet, so anything that is not `"fullscreen"` falls back to the regular renderer. Settings
+	 * coerce unknown values the same way in `SettingsManager.getTuiMode()`.
+	 */
+	readonly tuiMode: TuiMode;
 	readonly showHardwareCursor: boolean;
 	readonly logDirectory: string;
 	readonly terminal?: Terminal;

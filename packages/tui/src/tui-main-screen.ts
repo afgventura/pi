@@ -15,7 +15,7 @@ const MAX_RENDER_WRITE_CHARS = 1024 * 1024;
  * surrogate pairs so each write remains valid UTF-16. Callers append synchronized-output begin/end sequences themselves;
  * the final `flush()` writes any remainder, including the end sequence.
  */
-class BoundedTerminalWriter {
+export class BoundedTerminalWriter {
 	private buffer = "";
 	private writtenChars = 0;
 	private readonly write: (data: string) => void;
