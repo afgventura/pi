@@ -129,6 +129,13 @@ export class TuiScrollback extends TuiBase implements TUI {
 		this.viewportHeight = 0;
 		this.previousViewportLines = [];
 		this.previousWidth = 0;
+		// Drop anything still queued from before the rebuild, and record that the screen needs
+		// clearing. Both belong here rather than in the frame: the drain runs at the start of the
+		// frame and queues the re-created transcript, so a clear that discarded the queue from
+		// inside the frame threw away the very content it was meant to show - which is why a
+		// resumed session came up with an empty transcript.
+		this.pendingHistoryLines = [];
+		this.pendingScroll = 0;
 		this.needsClear = true;
 	}
 
@@ -168,9 +175,9 @@ export class TuiScrollback extends TuiBase implements TUI {
 		output.append("\x1b[?2026h");
 		if (this.needsClear) {
 			// Clear the screen and the scrollback above it in the same synchronized update as the
-			// repaint below, so the terminal never displays the cleared state.
+			// repaint below, so the terminal never displays the cleared state. Anything stale was
+			// already dropped by resetScrollback; what the drain queued this frame must survive.
 			this.needsClear = false;
-			this.pendingHistoryLines = [];
 			output.append("\x1b[2J\x1b[H\x1b[3J");
 		}
 		// Give the viewport its new rows first, then write the queued history into what is left.
