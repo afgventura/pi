@@ -845,6 +845,7 @@ export class InteractiveMode {
 		tui: TuiMainScreen | TuiAltScreen | TuiScrollback,
 		components: readonly Component[],
 	): void {
+		tui.terminal.setForeignOutputHandler?.((line) => this.appendTerminalOutput(line));
 		for (const component of components) tui.addChild(component);
 		if (TuiLayouts.isViewportTUI(tui)) {
 			if (!this.fullscreenLayoutRoot) throw new Error("Fullscreen layout is not initialized");
@@ -3803,6 +3804,19 @@ export class InteractiveMode {
 		this.chatContainer.addChild(text);
 		this.lastStatusSpacer = spacer;
 		this.lastStatusText = text;
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Show a line that code other than the TUI wrote to the terminal while the TUI owns it.
+	 *
+	 * ProcessTerminal captures those writes and hands them here (see foreign-output.ts in pi-tui).
+	 * Left alone they land at the cursor position and shift the screen under the renderer, which
+	 * then paints the next frame over the wrong rows. A failed MCP connection logging its OAuth URL
+	 * with console.log is the common case.
+	 */
+	private appendTerminalOutput(line: string): void {
+		this.chatContainer.addChild(new Text(theme.fg("dim", line), this.outputPad, 0));
 		this.ui.requestRender();
 	}
 

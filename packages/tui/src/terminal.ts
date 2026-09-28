@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { captureForeignOutput, type ForeignOutputCapture, writeTtyOutput } from "./foreign-output.ts";
 import { setKittyProtocolActive } from "./keys.ts";
 import { isNativeModifierPressed } from "./native-modifiers.ts";
 import { getNativePlatformHelper } from "./native-platform.ts";
@@ -86,6 +87,15 @@ export interface Terminal {
 	// Write output to terminal
 	write(data: string): void;
 
+	/**
+	 * Route output written by code other than the TUI (an extension's console.log, a library holding
+	 * the tty) to `handler` while the TUI runs, instead of letting it land at the cursor position and
+	 * corrupt the frame. Register before start(); pass undefined to detach.
+	 *
+	 * Optional: a Terminal that does not own the real tty (test doubles, embedded renderers) can omit it.
+	 */
+	setForeignOutputHandler?(handler: ((line: string) => void) | undefined): void;
+
 	// Get terminal dimensions
 	get columns(): number;
 	get rows(): number;
@@ -146,6 +156,8 @@ export class ProcessTerminal implements Terminal {
 	private stdinBuffer?: StdinBuffer;
 	private stdinDataHandler?: (data: string) => void;
 	private progressInterval?: ReturnType<typeof setInterval>;
+	private foreignOutputHandler?: (line: string) => void;
+	private foreignOutputCapture?: ForeignOutputCapture;
 	private writeLogPath = (() => {
 		const env = process.env.PI_TUI_WRITE_LOG || "";
 		if (!env) return "";
@@ -169,9 +181,29 @@ export class ProcessTerminal implements Terminal {
 		return this._modifyOtherKeysActive;
 	}
 
+	setForeignOutputHandler(handler: ((line: string) => void) | undefined): void {
+		this.foreignOutputHandler = handler;
+	}
+
+	/**
+	 * Capture tty writes from code other than the TUI for as long as the TUI owns the terminal.
+	 * Without a handler the writes pass through: a host that cannot display them is no worse off.
+	 */
+	private startForeignOutputCapture(): void {
+		if (this.foreignOutputCapture || !this.foreignOutputHandler) return;
+		this.foreignOutputCapture = captureForeignOutput((line) => this.foreignOutputHandler?.(line));
+	}
+
+	private stopForeignOutputCapture(): void {
+		if (!this.foreignOutputCapture) return;
+		this.foreignOutputCapture.release();
+		this.foreignOutputCapture = undefined;
+	}
+
 	start(onInput: (data: string) => void, onResize: () => void): void {
 		this.inputHandler = onInput;
 		this.resizeHandler = onResize;
+		this.startForeignOutputCapture();
 
 		// Save previous state and enable raw mode
 		this.wasRaw = process.stdin.isRaw || false;
@@ -182,7 +214,7 @@ export class ProcessTerminal implements Terminal {
 		process.stdin.resume();
 
 		// Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
-		process.stdout.write("\x1b[?2004h");
+		writeTtyOutput("\x1b[?2004h");
 
 		// Set up resize handler immediately
 		process.stdout.on("resize", this.resizeHandler);
@@ -258,7 +290,7 @@ export class ProcessTerminal implements Terminal {
 		process.stdin.on("data", this.stdinDataHandler!);
 		this.keyboardProtocolPushed = true;
 		this.clearKeyboardProtocolNegotiationBuffer();
-		process.stdout.write(KITTY_KEYBOARD_PROTOCOL_QUERY);
+		writeTtyOutput(KITTY_KEYBOARD_PROTOCOL_QUERY);
 	}
 
 	private handleKeyboardProtocolNegotiationSequence(
@@ -356,13 +388,13 @@ export class ProcessTerminal implements Terminal {
 
 	private enableModifyOtherKeys(): void {
 		if (this._kittyProtocolActive || this._modifyOtherKeysActive) return;
-		process.stdout.write("\x1b[>4;2m");
+		writeTtyOutput("\x1b[>4;2m");
 		this._modifyOtherKeysActive = true;
 	}
 
 	private disableModifyOtherKeys(): void {
 		if (!this._modifyOtherKeysActive) return;
-		process.stdout.write("\x1b[>4;0m");
+		writeTtyOutput("\x1b[>4;0m");
 		this._modifyOtherKeysActive = false;
 	}
 
@@ -387,7 +419,7 @@ export class ProcessTerminal implements Terminal {
 		if (shouldDisableKittyProtocol) {
 			// Disable Kitty keyboard protocol first so any late key releases
 			// do not generate new Kitty escape sequences.
-			process.stdout.write("\x1b[<u");
+			writeTtyOutput("\x1b[<u");
 			this.keyboardProtocolPushed = false;
 			this._kittyProtocolActive = false;
 			setKittyProtocolActive(false);
@@ -420,19 +452,21 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	stop(): void {
+		// Restore the writers before the restore sequences below, so they reach the terminal directly.
+		this.stopForeignOutputCapture();
 		if (this.clearProgressInterval()) {
-			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
+			writeTtyOutput(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}
 
 		// Disable bracketed paste mode
-		process.stdout.write("\x1b[?2004l");
+		writeTtyOutput("\x1b[?2004l");
 
 		const shouldDisableKittyProtocol = this.keyboardProtocolPushed || this._kittyProtocolActive;
 		this.clearKeyboardProtocolNegotiationBuffer();
 
 		// Disable Kitty keyboard protocol if not already done by drainInput()
 		if (shouldDisableKittyProtocol) {
-			process.stdout.write("\x1b[<u");
+			writeTtyOutput("\x1b[<u");
 			this.keyboardProtocolPushed = false;
 			this._kittyProtocolActive = false;
 			setKittyProtocolActive(false);
@@ -468,7 +502,7 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	write(data: string): void {
-		process.stdout.write(data);
+		writeTtyOutput(data);
 		if (this.writeLogPath) {
 			try {
 				fs.appendFileSync(this.writeLogPath, data, { encoding: "utf8" });
@@ -489,52 +523,52 @@ export class ProcessTerminal implements Terminal {
 	moveBy(lines: number): void {
 		if (lines > 0) {
 			// Move down
-			process.stdout.write(`\x1b[${lines}B`);
+			writeTtyOutput(`\x1b[${lines}B`);
 		} else if (lines < 0) {
 			// Move up
-			process.stdout.write(`\x1b[${-lines}A`);
+			writeTtyOutput(`\x1b[${-lines}A`);
 		}
 		// lines === 0: no movement
 	}
 
 	hideCursor(): void {
-		process.stdout.write("\x1b[?25l");
+		writeTtyOutput("\x1b[?25l");
 	}
 
 	showCursor(): void {
-		process.stdout.write("\x1b[?25h");
+		writeTtyOutput("\x1b[?25h");
 	}
 
 	clearLine(): void {
-		process.stdout.write("\x1b[K");
+		writeTtyOutput("\x1b[K");
 	}
 
 	clearFromCursor(): void {
-		process.stdout.write("\x1b[J");
+		writeTtyOutput("\x1b[J");
 	}
 
 	clearScreen(): void {
-		process.stdout.write("\x1b[2J\x1b[H"); // Clear screen and move to home (1,1)
+		writeTtyOutput("\x1b[2J\x1b[H"); // Clear screen and move to home (1,1)
 	}
 
 	setTitle(title: string): void {
 		// OSC 0;title BEL - set terminal window title
-		process.stdout.write(`\x1b]0;${title}\x07`);
+		writeTtyOutput(`\x1b]0;${title}\x07`);
 	}
 
 	setProgress(active: boolean): void {
 		if (active) {
 			// OSC 9;4;3 - indeterminate progress
-			process.stdout.write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
+			writeTtyOutput(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
 			if (!this.progressInterval) {
 				this.progressInterval = setInterval(() => {
-					process.stdout.write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
+					writeTtyOutput(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
 				}, TERMINAL_PROGRESS_KEEPALIVE_MS);
 			}
 		} else {
 			this.clearProgressInterval();
 			// OSC 9;4;0 - clear progress
-			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
+			writeTtyOutput(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}
 	}
 

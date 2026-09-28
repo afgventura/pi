@@ -298,3 +298,68 @@ describe("ProcessTerminal dimensions", () => {
 		}
 	});
 });
+
+describe("ProcessTerminal foreign output", () => {
+	/** Start a terminal with a recording tty writer and restore every patched global afterwards. */
+	async function withRunningTerminal(
+		capture: boolean,
+		run: (context: { terminal: ProcessTerminal; lines: string[]; writes: string[] }) => void,
+	): Promise<void> {
+		const terminal = new ProcessTerminal();
+		const lines: string[] = [];
+		const writes: string[] = [];
+		const previousStdoutWrite = process.stdout.write;
+		const previousStderrWrite = process.stderr.write;
+		const previousOn = process.stdin.on;
+		const recordingWrite = ((chunk: string | Uint8Array) => {
+			writes.push(String(chunk));
+			return true;
+		}) as typeof process.stdout.write;
+		process.stdout.write = recordingWrite;
+		process.stderr.write = recordingWrite;
+		process.stdin.on = (() => process.stdin) as typeof process.stdin.on;
+
+		if (capture) terminal.setForeignOutputHandler((line) => lines.push(line));
+		terminal.start(
+			() => {},
+			() => {},
+		);
+		try {
+			run({ terminal, lines, writes });
+		} finally {
+			try {
+				terminal.stop();
+			} finally {
+				process.stdout.write = previousStdoutWrite;
+				process.stderr.write = previousStderrWrite;
+				process.stdin.on = previousOn;
+				setKittyProtocolActive(false);
+			}
+		}
+	}
+
+	it("captures tty writes from other code while the TUI runs and releases them on stop", async () => {
+		await withRunningTerminal(true, ({ terminal, lines, writes }) => {
+			process.stdout.write("extension log line\n");
+			process.stderr.write("stderr line\n");
+			assert.deepEqual(lines, ["extension log line", "stderr line"]);
+
+			// TUI-owned writes still reach the terminal while the capture is installed.
+			terminal.write("\x1b[2Jframe");
+			assert.ok(writes.includes("\x1b[2Jframe"));
+
+			terminal.stop();
+			process.stdout.write("after stop\n");
+			assert.deepEqual(lines, ["extension log line", "stderr line"]);
+			assert.ok(writes.includes("after stop\n"));
+		});
+	});
+
+	it("leaves tty writes alone when no handler wants them", async () => {
+		await withRunningTerminal(false, ({ terminal, writes }) => {
+			process.stdout.write("uncaptured\n");
+			assert.ok(writes.includes("uncaptured\n"));
+			terminal.stop();
+		});
+	});
+});
