@@ -124,7 +124,7 @@ See [Settings](settings.md#tools) for configuring the default tool selection.
 - `-nt`, `--no-tools`<br>
   Starts with all built-in, extension, and custom tools disabled.
 
-Default enabled tools are `read`, `bash`, `edit`, and `write`, unless `defaultTools` changes them.
+Default enabled tools are `read`, `bash`, `edit`, `write`, and `set_cwd`, unless `defaultTools` changes them.
 
 | Built-in | Purpose |
 |---|---|
@@ -136,6 +136,7 @@ Default enabled tools are `read`, `bash`, `edit`, and `write`, unless `defaultTo
 | `grep` | Search file contents |
 | `find` | Find paths using glob patterns |
 | `ls` | List directory contents |
+| `set_cwd` | Change the session working directory |
 
 <a id="resource-options"></a>
 

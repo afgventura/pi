@@ -17,6 +17,14 @@ Use `/name` or `--name` to assign a recognizable session name. Run `/session` to
 
 The session picker lets you search, rename, and delete sessions. It can also show paths, change sorting, and limit results to named sessions. See [Keybindings](keybindings.md#sessions) for its shortcuts.
 
+## Change the working directory
+
+The working directory belongs to the session, not to a single tool call. Run `/cd <dir>` to move it, or let the agent call the `set_cwd` tool. Later tool calls in the same turn already use the new directory: built-in tools resolve relative paths against it, and shell commands run there.
+
+Moving re-reads the settings, context files, skills, prompt templates, themes, and extensions for the new directory, and applies the same project-trust decision as startup. Print, JSON, and RPC modes cannot show the trust prompt, so an undecided directory with protected resources stays untrusted unless `defaultProjectTrust` is `"always"`.
+
+The session keeps its history. Its file moves into the new directory's session bucket under `~/.pi/agent/sessions/`, so `--continue` in the new directory still finds it. A session that uses `--session-dir` keeps its file where it is.
+
 ## Choose how to branch
 
 Pi stores entries as a tree, so returning to an earlier point does not erase the branch you leave.
@@ -52,6 +60,8 @@ By default, Pi stores sessions under `~/.pi/agent/sessions/`, grouped by working
 Use `--no-session` for an ephemeral run. An ephemeral session cannot be resumed after Pi exits.
 
 Use `--session` when you already know the session path or ID. Use `--fork` to create a new session from an existing session before interactive mode starts.
+
+A session file follows its working directory. When `/cd` or the `set_cwd` tool moves a session that uses the default session directory, Pi moves the JSONL file into the new directory's bucket and rewrites the header `cwd`, so `--continue` in the new directory finds it. A session using `--session-dir` keeps its path.
 
 ## Export or share a session
 

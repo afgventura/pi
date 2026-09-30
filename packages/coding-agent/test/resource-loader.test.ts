@@ -84,6 +84,27 @@ describe("DefaultResourceLoader", () => {
 			]);
 		});
 
+		it("should hide host dependency warnings when quietExtensionWarnings is enabled", async () => {
+			const packageRoot = join(tempDir, "quiet-extension-package");
+			const extensionsDir = join(packageRoot, "extensions");
+			mkdirSync(extensionsDir, { recursive: true });
+			writeFileSync(
+				join(packageRoot, "package.json"),
+				JSON.stringify({ dependencies: { "@earendil-works/pi-coding-agent": "1.0.0", typebox: "1.3.7" } }),
+			);
+			writeFileSync(join(extensionsDir, "package-extension.ts"), "export default function() {}");
+
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				settingsManager: SettingsManager.inMemory({ packages: [packageRoot], quietExtensionWarnings: true }),
+			});
+			await loader.reload();
+
+			expect(loader.getExtensions().extensions).toHaveLength(1);
+			expect(loader.getExtensions().warnings).toEqual([]);
+		});
+
 		it("should fail when an extension package manifest cannot be parsed", async () => {
 			const packageRoot = join(tempDir, "invalid-extension-package");
 			const extensionsDir = join(packageRoot, "extensions");

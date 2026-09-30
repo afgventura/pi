@@ -37,9 +37,9 @@ See [Choose a Model](models.md) for model selection and thinking controls.
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `defaultTools` | `string[]` | `read`, `bash`, `edit`, `write` | Built-in tools enabled at startup. An empty array disables all built-in tools but not extension or SDK tools. |
+| `defaultTools` | `string[]` | `read`, `bash`, `edit`, `write`, `set_cwd` | Built-in tools enabled at startup. An empty array disables all built-in tools but not extension or SDK tools. |
 
-Available built-in tools are `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. CLI tool options override this setting for one invocation. See [Command Line](cli.md#tools).
+Available built-in tools are `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls`, and `set_cwd`. CLI tool options override this setting for one invocation. See [Command Line](cli.md#tools).
 
 ## Sessions and context
 
@@ -75,6 +75,7 @@ See [Compaction Reference](compaction.md) for trigger, summarization, and valida
 |---|---|---|---|
 | `theme` | string | Detected | Built-in or custom theme name. |
 | `quietStartup` | boolean | `false` | Hide the startup header. |
+| `quietExtensionWarnings` | boolean | `false` | Hide extension package manifest warnings (an extension declaring a host-provided package in `dependencies`). |
 | `tuiMode` | `"regular" \| "fullscreen"` | `"regular"` | Interactive terminal UI mode. |
 | `fullscreenExitOutput` | `"transcript" \| "resume-hint"` | `"transcript"` | Output printed when fullscreen mode exits. |
 | `fullscreenScrollbar` | `"auto" \| "always" \| "hidden"` | `"auto"` | Fullscreen transcript scrollbar behavior. |

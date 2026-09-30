@@ -524,6 +524,17 @@ export class ExtensionRunner {
 		this.mode = mode;
 	}
 
+	/**
+	 * Point contexts created by this runner at another working directory.
+	 *
+	 * Wrapped tools and extensions read `ctx.cwd` from the runner, so an in-place cwd change
+	 * must update the runner that already-produced contexts belong to. Tool objects the agent
+	 * already holds keep working and resolve paths against the new directory.
+	 */
+	setCwd(cwd: string): void {
+		this.cwd = cwd;
+	}
+
 	private wrapUIPromptContext(ui: ExtensionUIContext): ExtensionUIContext {
 		return {
 			...ui,
