@@ -24,6 +24,40 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
 const STRUCTURED_OUTPUT_MAX_BYTES = 1024 * 1024;
 const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
 
+/** Default number of seconds a shell command may run before it is moved to the background. */
+export const DEFAULT_SHELL_BACKGROUND_AFTER_SECONDS = 60;
+
+/** Receives background shell job events for the session that should surface them. */
+export type BackgroundShellJobReporter = (event: BashBackgroundJobEvent) => void;
+
+let backgroundJobReporter: BackgroundShellJobReporter | undefined;
+
+/**
+ * Install the reporter that receives background shell job events from every
+ * shell tool in this process, including tools an extension created with
+ * `createBashTool` (the session cannot pass `onBackgroundJob` to those).
+ *
+ * Returns a function that removes the reporter only if it is still installed.
+ */
+export function setBackgroundShellJobReporter(reporter: BackgroundShellJobReporter): () => void {
+	backgroundJobReporter = reporter;
+	return () => {
+		if (backgroundJobReporter === reporter) {
+			backgroundJobReporter = undefined;
+		}
+	};
+}
+
+/** Human-readable reason a backgrounded command did not run to completion. */
+function describeExecFailure(error: unknown): string {
+	if (error instanceof Error) {
+		if (error.message === "aborted") return "aborted";
+		if (error.message.startsWith("timeout:")) return `timed out after ${error.message.split(":")[1]} seconds`;
+		return error.message;
+	}
+	return String(error);
+}
+
 function resolveTimeoutMs(timeout: number | undefined): number | undefined {
 	if (timeout === undefined) return undefined;
 	if (!Number.isFinite(timeout) || timeout <= 0) {
@@ -39,7 +73,12 @@ function resolveTimeoutMs(timeout: number | undefined): number | undefined {
 
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Shell command to execute" }),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+	timeout: Type.Optional(
+		Type.Number({
+			description:
+				"Timeout in seconds (optional, no default timeout). The command is killed at the timeout and is never moved to the background.",
+		}),
+	),
 });
 
 export const bashToolSystemPromptContribution = {
@@ -66,7 +105,39 @@ export type BashToolOutput = Static<typeof bashOutputSchema>;
 export interface BashToolDetails {
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
+	/** Set when the command was moved to the background instead of blocking the turn. */
+	backgroundJob?: BashBackgroundJob;
 }
+
+/**
+ * A shell command that outlived the background threshold and kept running in the
+ * background instead of blocking the agent turn.
+ */
+export interface BashBackgroundJob {
+	/** Tool call that started the command; stable for the lifetime of the job. */
+	id: string;
+	command: string;
+	cwd: string;
+	pid?: number;
+	startedAt: number;
+	backgroundAfterMs: number;
+}
+
+/** Lifecycle notification for a backgrounded shell command. */
+export type BashBackgroundJobEvent =
+	| { type: "backgrounded"; job: BashBackgroundJob }
+	| {
+			type: "exited";
+			job: BashBackgroundJob;
+			exitCode: number | null;
+			/** Final output, truncated the same way a normal tool result is. */
+			output: string;
+			fullOutputPath?: string;
+			truncation?: TruncationResult;
+			durationMs: number;
+			/** Set when the command did not run to completion (aborted, failed to spawn). */
+			error?: string;
+	  };
 
 /**
  * Pluggable operations for the bash tool.
@@ -89,6 +160,8 @@ export interface BashOperations {
 			signal?: AbortSignal;
 			timeout?: number;
 			env?: NodeJS.ProcessEnv;
+			/** Reports the spawned process id, when the backend knows it. */
+			onSpawn?: (pid: number | undefined) => void;
 		},
 	) => Promise<{ exitCode: number | null }>;
 }
@@ -96,7 +169,7 @@ export interface BashOperations {
 /** Shared process execution used by the built-in shell tools. */
 export function createLocalShellOperations(shellName: string, resolveShellConfig: () => ShellConfig): BashOperations {
 	return {
-		exec: async (command, cwd, { onData, signal, timeout, env }) => {
+		exec: async (command, cwd, { onData, signal, timeout, env, onSpawn }) => {
 			const timeoutMs = resolveTimeoutMs(timeout);
 			if (signal?.aborted) {
 				throw new Error("aborted");
@@ -121,6 +194,7 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				child.stdin?.end(command);
 			}
 			if (child.pid) trackDetachedChildPid(child.pid);
+			onSpawn?.(child.pid);
 			let timedOut = false;
 			let timeoutHandle: NodeJS.Timeout | undefined;
 			const onAbort = () => {
@@ -214,6 +288,19 @@ function resolveSpawnContext(
 export interface BashToolOptions {
 	/** Custom operations for command execution. Default: local shell */
 	operations?: BashOperations;
+	/**
+	 * Seconds a command may run before it is moved to the background
+	 * (default `DEFAULT_SHELL_BACKGROUND_AFTER_SECONDS`); 0 keeps the blocking
+	 * behavior. An explicit `timeout` always wins: a command with a timeout is
+	 * killed at the timeout instead of backgrounded.
+	 */
+	backgroundAfterSeconds?: number;
+	/**
+	 * Called when a command is moved to the background and again when it exits.
+	 * Without it, events go to the reporter installed by
+	 * `setBackgroundShellJobReporter`, when one is installed.
+	 */
+	onBackgroundJob?: (event: BashBackgroundJobEvent) => void;
 	/** Command prefix prepended to every command (for example shell setup commands) */
 	commandPrefix?: string;
 	/** Optional explicit shell path from settings */
@@ -249,17 +336,29 @@ export function createShellToolDefinition(
 	const commandPrefix = options?.commandPrefix;
 	const exposeSessionEnvironment = options?.exposeSessionEnvironment ?? true;
 	const spawnHook = options?.spawnHook;
+	const backgroundAfterMs =
+		Math.max(0, options?.backgroundAfterSeconds ?? DEFAULT_SHELL_BACKGROUND_AFTER_SECONDS) * 1000;
+	const backgroundAfterSeconds = Math.round(backgroundAfterMs / 1000);
+	const canBackground = backgroundAfterMs > 0;
+	const guidelines = [
+		...(exposeSessionEnvironment && config.promptGuidelines ? config.promptGuidelines : []),
+		...(canBackground
+			? [
+					`A ${config.shellName} command that is still running after ${backgroundAfterSeconds}s is moved to the background: the tool returns its output so far immediately and you are told when the command exits, with its exit code and final output. Do not poll it and do not run it again.`,
+				]
+			: []),
+	];
 	return {
 		name: config.name,
 		label: config.label,
-		description: `Execute a ${config.shellName} command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+		description: `Execute a ${config.shellName} command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.${canBackground ? ` A command that is still running after ${backgroundAfterSeconds}s is moved to the background instead of blocking the turn.` : ""}`,
 		promptSnippet: config.promptSnippet,
-		promptGuidelines: exposeSessionEnvironment && config.promptGuidelines ? [...config.promptGuidelines] : undefined,
+		promptGuidelines: guidelines.length > 0 ? guidelines : undefined,
 		parameters: bashSchema,
 		outputSchema: bashOutputSchema,
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		async execute(
-			_toolCallId,
+			toolCallId,
 			{ command, timeout }: { command: string; timeout?: number },
 			signal?: AbortSignal,
 			onUpdate?,
@@ -274,13 +373,19 @@ export function createShellToolDefinition(
 				ctx,
 			);
 			const output = new OutputAccumulator({ tempFilePrefix: config.tempFilePrefix });
+			const startedAt = Date.now();
+			// An explicit timeout keeps its documented meaning: the command is killed
+			// at the timeout instead of being moved to the background.
+			const backgroundDeadlineMs = canBackground && timeout === undefined ? backgroundAfterMs : undefined;
 			let acceptingOutput = true;
+			let acceptingUpdates = true;
 			let updateTimer: NodeJS.Timeout | undefined;
 			let updateDirty = false;
 			let lastUpdateAt = 0;
+			let spawnedPid: number | undefined;
 
 			const emitOutputUpdate = () => {
-				if (!onUpdate || !updateDirty) return;
+				if (!onUpdate || !updateDirty || !acceptingUpdates) return;
 				updateDirty = false;
 				lastUpdateAt = Date.now();
 				const snapshot = output.snapshot({ persistIfTruncated: true });
@@ -301,7 +406,7 @@ export function createShellToolDefinition(
 			};
 
 			const scheduleOutputUpdate = () => {
-				if (!onUpdate) return;
+				if (!onUpdate || !acceptingUpdates) return;
 				updateDirty = true;
 				const delay = BASH_UPDATE_THROTTLE_MS - (Date.now() - lastUpdateAt);
 				if (delay <= 0) {
@@ -356,19 +461,99 @@ export function createShellToolDefinition(
 			};
 
 			const appendStatus = (text: string, status: string) => `${text ? `${text}\n\n` : ""}${status}`;
-			const startedAt = performance.now();
+			const wallStartMs = performance.now();
+
+			/** Finalize output after the process is gone, without touching the finished tool card. */
+			const finishBackgroundOutput = async () => {
+				acceptingOutput = false;
+				output.finish();
+				clearUpdateTimer();
+				const snapshot = output.snapshot({ persistIfTruncated: true });
+				await output.closeTempFile();
+				return snapshot;
+			};
+
+			const backgroundNotice = (job: BashBackgroundJob) => {
+				const pid = job.pid !== undefined ? `, pid ${job.pid}` : "";
+				const stop =
+					job.pid !== undefined && process.platform !== "win32" ? ` Stop it with \`kill -TERM -${job.pid}\`.` : "";
+				return `Command is still running after ${Math.round(job.backgroundAfterMs / 1000)}s and was moved to the background (job ${job.id}${pid}). It keeps running while pi is open; you will be told when it exits, with its exit code and final output. Do not poll it and do not run it again.${stop}`;
+			};
+
+			const emitBackgroundEvent = (event: BashBackgroundJobEvent) => {
+				if (options?.onBackgroundJob) options.onBackgroundJob(event);
+				else backgroundJobReporter?.(event);
+			};
 
 			try {
-				let exitCode: number | null;
-				try {
-					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
+				const execution = ops
+					.exec(spawnContext.command, spawnContext.cwd, {
 						onData: handleData,
 						signal,
 						timeout,
 						env: spawnContext.env,
+						onSpawn: (pid) => {
+							spawnedPid = pid;
+						},
+					})
+					.then(
+						(executed) => ({ executed }) as const,
+						(error: unknown) => ({ error }) as const,
+					);
+
+				if (backgroundDeadlineMs !== undefined) {
+					let deadlineTimer: NodeJS.Timeout | undefined;
+					const reachedDeadline = new Promise<"background">((resolve) => {
+						deadlineTimer = setTimeout(() => resolve("background"), backgroundDeadlineMs);
 					});
-					exitCode = result.exitCode;
-				} catch (err) {
+					const winner = await Promise.race([execution.then(() => "finished" as const), reachedDeadline]);
+					if (deadlineTimer) clearTimeout(deadlineTimer);
+
+					if (winner === "background") {
+						const job: BashBackgroundJob = {
+							id: toolCallId,
+							command: spawnContext.command,
+							cwd: spawnContext.cwd,
+							pid: spawnedPid,
+							startedAt,
+							backgroundAfterMs,
+						};
+						// This call is done, so its card stops updating; the accumulator keeps
+						// collecting the (bounded) output for the completion notification.
+						acceptingUpdates = false;
+						clearUpdateTimer();
+						const snapshot = output.snapshot({ persistIfTruncated: true });
+						const { text, details } = formatOutput(snapshot, "(no output yet)");
+						emitBackgroundEvent({ type: "backgrounded", job });
+						void execution.then(async (outcome) => {
+							try {
+								const finalSnapshot = await finishBackgroundOutput();
+								const final = {
+									job,
+									output: finalSnapshot.content,
+									fullOutputPath: finalSnapshot.fullOutputPath,
+									truncation: finalSnapshot.truncation.truncated ? finalSnapshot.truncation : undefined,
+									durationMs: Date.now() - startedAt,
+								};
+								emitBackgroundEvent(
+									"error" in outcome
+										? { type: "exited", ...final, exitCode: null, error: describeExecFailure(outcome.error) }
+										: { type: "exited", ...final, exitCode: outcome.executed.exitCode },
+								);
+							} catch {
+								// A failure while reporting completion must not become an unhandled rejection.
+							}
+						});
+						return {
+							content: [{ type: "text" as const, text: appendStatus(text, backgroundNotice(job)) }],
+							details: { ...details, backgroundJob: job },
+						};
+					}
+				}
+
+				const outcome = await execution;
+				if ("error" in outcome) {
+					const err = outcome.error;
 					const snapshot = await finishOutput();
 					const { text } = formatOutput(snapshot, "");
 					if (err instanceof Error && err.message === "aborted") {
@@ -381,12 +566,13 @@ export function createShellToolDefinition(
 					throw err;
 				}
 
+				const exitCode = outcome.executed.exitCode;
 				const snapshot = await finishOutput();
 				const { text: outputText, details } = formatOutput(snapshot);
 				if (exitCode === null) {
 					throw new Error(appendStatus(outputText, "Command terminated without an exit code"));
 				}
-				const wallTimeSeconds = Math.round((performance.now() - startedAt) / 100) / 10;
+				const wallTimeSeconds = Math.round((performance.now() - wallStartMs) / 100) / 10;
 				const fullOutput = await output.readFullOutput(STRUCTURED_OUTPUT_MAX_BYTES);
 				const structuredContent: BashToolOutput = {
 					output: fullOutput.content,

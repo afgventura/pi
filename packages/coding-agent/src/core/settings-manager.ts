@@ -14,6 +14,7 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
+import { DEFAULT_SHELL_BACKGROUND_AFTER_SECONDS } from "./tools/bash.ts";
 
 export interface CompactionModelOverride {
 	reserveTokens?: number;
@@ -150,6 +151,7 @@ export interface Settings {
 	quietStartup?: QuietStartup; // default: false
 	defaultProjectTrust?: DefaultProjectTrust; // default: "ask"; global setting only
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
+	shellBackgroundAfterSeconds?: number; // Seconds a shell command may run before it is moved to the background; 0 disables
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
 	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
 	enableInstallTelemetry?: boolean; // default: true - anonymous version/update ping after changelog-detected updates
@@ -1115,6 +1117,20 @@ export class SettingsManager {
 	setShellCommandPrefix(prefix: string | undefined): void {
 		this.globalSettings.shellCommandPrefix = prefix;
 		this.markModified("shellCommandPrefix");
+		this.save();
+	}
+
+	getShellBackgroundAfterSeconds(): number {
+		const seconds = this.settings.shellBackgroundAfterSeconds;
+		if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
+			return DEFAULT_SHELL_BACKGROUND_AFTER_SECONDS;
+		}
+		return Math.floor(seconds);
+	}
+
+	setShellBackgroundAfterSeconds(seconds: number | undefined): void {
+		this.globalSettings.shellBackgroundAfterSeconds = seconds;
+		this.markModified("shellBackgroundAfterSeconds");
 		this.save();
 	}
 

@@ -1,4 +1,6 @@
 export {
+	type BashBackgroundJob,
+	type BashBackgroundJobEvent,
 	type BashOperations,
 	type BashSpawnContext,
 	type BashSpawnHook,
@@ -8,6 +10,7 @@ export {
 	createBashTool,
 	createBashToolDefinition,
 	createLocalBashOperations,
+	DEFAULT_SHELL_BACKGROUND_AFTER_SECONDS,
 } from "./bash.ts";
 export {
 	createEditTool,

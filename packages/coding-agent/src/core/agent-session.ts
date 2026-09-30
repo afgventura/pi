@@ -139,9 +139,15 @@ import {
 	type NormalizedBuildSystemPromptOptions,
 	normalizeBuildSystemPromptOptions,
 } from "./system-prompt.ts";
-import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
+import {
+	type BashBackgroundJobEvent,
+	type BashOperations,
+	createLocalBashOperations,
+	setBackgroundShellJobReporter,
+} from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
+import { truncateTail } from "./tools/truncate.ts";
 import { addUsageToTotals, combineUsage, createUsageTotals } from "./usage-totals.ts";
 import {
 	findLatestResponse,
@@ -151,6 +157,10 @@ import {
 	VIRTUAL_MODEL_STATE_ENTRY,
 	type VirtualModelStateData,
 } from "./virtual-models.ts";
+
+/** Output limits for the message that reports a finished background shell command. */
+const SHELL_BACKGROUND_NOTIFY_MAX_LINES = 60;
+const SHELL_BACKGROUND_NOTIFY_MAX_BYTES = 8_000;
 
 // ============================================================================
 // Skill Block Parsing
@@ -433,6 +443,7 @@ export class AgentSession {
 	private _allowedToolNames?: Set<string>;
 	private _excludedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
+	private _unregisterShellBackgroundReporter?: () => void;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionMode: ExtensionMode = "print";
@@ -495,6 +506,13 @@ export class AgentSession {
 			includeAllExtensionTools: true,
 		});
 		if (this._initialActiveToolNames === undefined) this._restoreToolsFromTranscript();
+
+		// Background shell jobs are reported from inside the tool, which may be an
+		// extension-created tool this session never sees; route them here so their
+		// completion reaches the agent.
+		this._unregisterShellBackgroundReporter = setBackgroundShellJobReporter((event) =>
+			this._handleShellBackgroundJob(event),
+		);
 	}
 
 	get modelRuntime(): ModelRuntime {
@@ -1361,6 +1379,8 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		this._unregisterShellBackgroundReporter?.();
+		this._unregisterShellBackgroundReporter = undefined;
 		try {
 			this.abortRetry();
 			this.abortCompaction();
@@ -3572,7 +3592,11 @@ export class AgentSession {
 				)
 			: createAllToolDefinitions(this._cwd, {
 					read: { autoResizeImages },
-					bash: { commandPrefix: shellCommandPrefix, shellPath },
+					bash: {
+						commandPrefix: shellCommandPrefix,
+						shellPath,
+						backgroundAfterSeconds: this.settingsManager.getShellBackgroundAfterSeconds(),
+					},
 				});
 
 		this._baseToolDefinitions = new Map(
@@ -3867,6 +3891,62 @@ export class AgentSession {
 	/** Whether there are pending bash messages waiting to be flushed */
 	get hasPendingBashMessages(): boolean {
 		return this._pendingBashMessages.length > 0;
+	}
+
+	/**
+	 * Handle a shell tool command that outlived the background threshold.
+	 *
+	 * The tool call already returned the output so far, so only the exit needs to
+	 * reach the agent: without this message the model would have to poll or rerun
+	 * the command to learn how it ended.
+	 */
+	private _handleShellBackgroundJob(event: BashBackgroundJobEvent): void {
+		if (event.type !== "exited") return;
+
+		const tail = truncateTail(event.output, {
+			maxLines: SHELL_BACKGROUND_NOTIFY_MAX_LINES,
+			maxBytes: SHELL_BACKGROUND_NOTIFY_MAX_BYTES,
+		});
+		const seconds = Math.round(event.durationMs / 1000);
+		const elapsed =
+			seconds < 60
+				? `${seconds}s`
+				: seconds < 3600
+					? `${Math.floor(seconds / 60)}m${seconds % 60}s`
+					: `${(seconds / 3600).toFixed(1)}h`;
+		const status = event.error
+			? `failed (${event.error})`
+			: event.exitCode === 0
+				? "finished"
+				: `exited with code ${event.exitCode}`;
+		const body = tail.content.trim();
+
+		void this.sendCustomMessage(
+			{
+				customType: "shell-background",
+				content: [
+					`[background shell command ${status}] job ${event.job.id} after ${elapsed}`,
+					`command: ${event.job.command}`,
+					`cwd: ${event.job.cwd}`,
+					...(event.fullOutputPath ? [`full output: ${event.fullOutputPath}`] : []),
+					body ? `\n--- output ---\n${body}` : "\n(no output)",
+				].join("\n"),
+				display: true,
+				details: {
+					jobId: event.job.id,
+					pid: event.job.pid,
+					command: event.job.command,
+					exitCode: event.exitCode,
+					error: event.error,
+					durationMs: event.durationMs,
+					fullOutputPath: event.fullOutputPath,
+					output: tail.content,
+				},
+			},
+			this.isStreaming ? { triggerTurn: true, deliverAs: "followUp" } : { triggerTurn: true },
+		).catch(() => {
+			// A finishing background command must never break the session.
+		});
 	}
 
 	/**

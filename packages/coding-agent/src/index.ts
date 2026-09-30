@@ -330,6 +330,8 @@ export { createSyntheticSourceInfo } from "./core/source-info.ts";
 export { type EditDiffResult, generateDiffString, generateUnifiedPatch } from "./core/tools/edit-diff.ts";
 // Tools
 export {
+	type BashBackgroundJob,
+	type BashBackgroundJobEvent,
 	type BashOperations,
 	type BashSpawnContext,
 	type BashSpawnHook,
@@ -348,6 +350,7 @@ export {
 	createWriteToolDefinition,
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
+	DEFAULT_SHELL_BACKGROUND_AFTER_SECONDS,
 	type EditOperations,
 	type EditToolDetails,
 	type EditToolInput,

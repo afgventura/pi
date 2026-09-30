@@ -22,6 +22,9 @@ const cases = [
 	["ls", lsToolSystemPromptContribution, createLsToolDefinition],
 ] as const;
 
+/** The shell tools add guidance for the background threshold their own options set. */
+const BACKGROUND_GUIDELINE = /moved to the background/;
+
 describe("built-in tool system prompt contributions", () => {
 	test.each(cases)(
 		"keeps the %s tool definition aligned with its contribution",
@@ -29,7 +32,11 @@ describe("built-in tool system prompt contributions", () => {
 			const definition = createDefinition("/workspace");
 
 			expect(definition.promptSnippet).toBe(contribution.snippet);
-			expect(definition.promptGuidelines ?? []).toEqual(contribution.guidelines);
+			// bash and powershell prepend their background-threshold guidance; every other
+			// guideline must be exactly the contribution's own.
+			expect((definition.promptGuidelines ?? []).filter((line) => !BACKGROUND_GUIDELINE.test(line))).toEqual(
+				contribution.guidelines,
+			);
 		},
 	);
 
@@ -39,6 +46,8 @@ describe("built-in tool system prompt contributions", () => {
 	] as const)("keeps %s session-environment guidance conditional", (_name, createDefinition) => {
 		const definition = createDefinition("/workspace", { exposeSessionEnvironment: false });
 
-		expect(definition.promptGuidelines).toBeUndefined();
+		// The background guidance does not depend on the session environment, so only it is left.
+		expect(definition.promptGuidelines).toHaveLength(1);
+		expect(definition.promptGuidelines?.[0]).toMatch(BACKGROUND_GUIDELINE);
 	});
 });

@@ -138,6 +138,7 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are requir
 |---|---|---|---|
 | `shellPath` | string | Platform default | Custom shell executable path. Supports a leading `~`. |
 | `shellCommandPrefix` | string | None | Prefix prepended to every shell command. |
+| `shellBackgroundAfterSeconds` | number | `60` | Seconds a `bash` or `powershell` command may run before it is moved to the background. The tool returns its output so far and the agent is told when the command exits. Set to `0` to always block. A command with an explicit `timeout` is killed at that timeout instead. |
 | `npmCommand` | `string[]` | `npm` | Command and arguments used for npm package lookup and installation. |
 
 See [Shell aliases](shell-aliases.md) for shell setup and [Pi Packages](packages.md) for package-manager behavior.
