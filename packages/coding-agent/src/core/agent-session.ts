@@ -55,9 +55,11 @@ import {
 	resetApiProviders,
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
+import { getAgentDir } from "../config.ts";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { processImage } from "../utils/image-process.ts";
+import { resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
@@ -91,9 +93,11 @@ import {
 	ExtensionRunner,
 	type ExtensionUIContext,
 	type InputSource,
+	type LoadExtensionsResult,
 	type MessageEndEvent,
 	type MessageStartEvent,
 	type MessageUpdateEvent,
+	type ProjectTrustContext,
 	type ReplacedSessionContext,
 	type SessionBeforeCompactResult,
 	type SessionBeforeTreeResult,
@@ -117,6 +121,7 @@ import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./m
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { NestedToolCallRunner } from "./nested-tool-calls.ts";
+import { resolveProjectTrusted } from "./project-trust.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { exportSessionToJsonl } from "./session-export.ts";
@@ -125,6 +130,7 @@ import {
 	type CompactionEntry,
 	type ContextEditEntry,
 	getLatestCompactionEntry,
+	type SessionCwdChange,
 	type SessionEntry,
 	SessionManager,
 	type SessionProjection,
@@ -146,8 +152,10 @@ import {
 	setBackgroundShellJobReporter,
 } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
+import { createSetCwdToolDefinition } from "./tools/set-cwd.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { truncateTail } from "./tools/truncate.ts";
+import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./trust-manager.ts";
 import { addUsageToTotals, combineUsage, createUsageTotals } from "./usage-totals.ts";
 import {
 	findLatestResponse,
@@ -213,6 +221,7 @@ export type AgentSessionEvent =
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
 	| { type: "entry_appended"; entry: SessionEntry }
 	| { type: "session_info_changed"; name: string | undefined }
+	| { type: "cwd_change"; previousCwd: string; cwd: string; sessionFile: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| {
 			type: "compaction_end";
@@ -258,6 +267,8 @@ export interface AgentSessionConfig {
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
 	cwd: string;
+	/** Global config directory, used to resolve project trust for cwd changes. Default: the standard agent directory. */
+	agentDir?: string;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 	/** Resource loader for extensions, skills, prompts, themes, context files, and system prompt */
@@ -268,7 +279,7 @@ export interface AgentSessionConfig {
 	modelRuntime: ModelRuntime;
 	/** Keeps the prompt cache entry of the last session request warm. */
 	cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
-	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
+	/** Initial active built-in tool names. Default: [read, bash, edit, write, set_cwd] */
 	initialActiveToolNames?: string[];
 	/**
 	 * Whether the initial tools come from the `defaultTools` setting. When true, reload activates
@@ -431,6 +442,7 @@ export class AgentSession {
 	private _customTools: ToolDefinition[];
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
+	private _agentDir: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
 	/**
@@ -478,6 +490,7 @@ export class AgentSession {
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
+		this._agentDir = config.agentDir ?? getAgentDir();
 		this._modelRuntime = config.modelRuntime;
 		this._cacheWarmer = config.cacheWarmer;
 		if (this._cacheWarmer) {
@@ -1410,6 +1423,107 @@ export class AgentSession {
 	/** Refresh the public finalized transcript from the canonical session projection. */
 	refreshContext(): void {
 		this._refreshFinalizedContext();
+	}
+
+	/** Current session working directory. */
+	get cwd(): string {
+		return this._cwd;
+	}
+
+	/**
+	 * Move the session to another working directory.
+	 *
+	 * Built-in tools, shell commands, the system prompt, and project resources all follow the
+	 * new directory for the rest of the session. The session keeps its history; its file moves
+	 * into the target directory's session bucket when it uses the default one.
+	 *
+	 * Project trust for the target is resolved through `options.projectTrustContext` when the
+	 * caller can ask the user. Without it, a target that needs project trust and has no recorded
+	 * decision is refused.
+	 */
+	async setCwd(cwd: string, options?: { projectTrustContext?: ProjectTrustContext }): Promise<SessionCwdChange> {
+		const target = resolvePath(cwd, this._cwd);
+		const previousCwd = this._cwd;
+		if (target === previousCwd) {
+			return {
+				previousCwd,
+				cwd: target,
+				sessionFile: this.sessionManager.getSessionFile(),
+				relocated: false,
+			};
+		}
+
+		const previousTrusted = this.settingsManager.isProjectTrusted();
+		const previousFlagValues = this._extensionRunner.getFlagValues();
+		// Move the session first: it validates the directory and owns the persisted cwd.
+		const change = this.sessionManager.setCwd(target);
+		try {
+			await this.settingsManager.setCwd(target);
+			await this._resourceLoader.setCwd(target, {
+				resolveProjectTrust: ({ extensionsResult }) =>
+					this._resolveProjectTrust(target, options?.projectTrustContext, extensionsResult),
+			});
+		} catch (error) {
+			this.settingsManager.setProjectTrusted(previousTrusted);
+			await this.settingsManager.setCwd(previousCwd).catch(() => {});
+			await this._resourceLoader.setCwd(previousCwd).catch(() => {});
+			this.sessionManager.setCwd(previousCwd);
+			throw error;
+		}
+
+		this._cwd = target;
+		// The agent already holds the tool objects created for the previous directory, so update the
+		// runner they read `ctx.cwd` from before rebuilding the runtime for the next run.
+		this._extensionRunner.setCwd(target);
+		// Providers are deliberately not reset here: a directory change does not re-resolve providers,
+		// and resetting would drop providers a host registered programmatically.
+		this.syncQueueModesFromSettings();
+		this._buildRuntime({
+			activeToolNames: this.getActiveToolNames(),
+			flagValues: previousFlagValues,
+			includeAllExtensionTools: true,
+		});
+		await this.extendResourcesFromExtensions("reload");
+		this._emit({
+			type: "cwd_change",
+			previousCwd: change.previousCwd,
+			cwd: change.cwd,
+			sessionFile: change.sessionFile,
+		});
+		return change;
+	}
+
+	/**
+	 * Resolve project trust for a cwd-change target.
+	 *
+	 * Mirrors startup: extensions get the `project_trust` event first, then a recorded
+	 * decision, then the configured default. Without a trust context there is no way to
+	 * ask, so an undecided trust-requiring directory is refused.
+	 */
+	private async _resolveProjectTrust(
+		cwd: string,
+		projectTrustContext: ProjectTrustContext | undefined,
+		extensionsResult: LoadExtensionsResult,
+	): Promise<boolean> {
+		const trustStore = new ProjectTrustStore(this._agentDir);
+		if (!projectTrustContext) {
+			if (!hasTrustRequiringProjectResources(cwd)) {
+				return true;
+			}
+			const decision = trustStore.get(cwd);
+			if (decision !== null) {
+				return decision;
+			}
+			return this.settingsManager.getDefaultProjectTrust() === "always";
+		}
+
+		return resolveProjectTrusted({
+			cwd,
+			trustStore,
+			defaultProjectTrust: this.settingsManager.getDefaultProjectTrust(),
+			extensionsResult,
+			projectTrustContext,
+		});
 	}
 
 	/** Full agent state */
@@ -3583,21 +3697,26 @@ export class AgentSession {
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
-		const baseToolDefinitions = this._baseToolsOverride
+		const baseToolDefinitions: Record<string, ToolDefinition<any, any, any>> = this._baseToolsOverride
 			? Object.fromEntries(
 					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
 						name,
 						createToolDefinitionFromAgentTool(tool),
 					]),
 				)
-			: createAllToolDefinitions(this._cwd, {
-					read: { autoResizeImages },
-					bash: {
-						commandPrefix: shellCommandPrefix,
-						shellPath,
-						backgroundAfterSeconds: this.settingsManager.getShellBackgroundAfterSeconds(),
-					},
-				});
+			: {
+					...createAllToolDefinitions(this._cwd, {
+						read: { autoResizeImages },
+						bash: {
+							commandPrefix: shellCommandPrefix,
+							shellPath,
+							backgroundAfterSeconds: this.settingsManager.getShellBackgroundAfterSeconds(),
+						},
+					}),
+					set_cwd: createSetCwdToolDefinition(this._cwd, {
+						changeCwd: ({ path, projectTrustContext }) => this.setCwd(path, { projectTrustContext }),
+					}),
+				};
 
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
@@ -3625,7 +3744,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write"];
+			: ["read", "bash", "edit", "write", "set_cwd"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

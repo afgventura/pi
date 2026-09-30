@@ -44,6 +44,7 @@ describe("issue #7193 extension event-bus lifecycle", () => {
 			reload: async () => {
 				extensionsResult = await loadExtensions();
 			},
+			setCwd: async () => {},
 		};
 		const harness = await createHarness({ resourceLoader });
 		harnesses.push(harness);

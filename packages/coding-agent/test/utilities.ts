@@ -243,6 +243,7 @@ export function createTestResourceLoader(options: CreateTestResourceLoaderOption
 		getAppendSystemPromptSources: () => [],
 		extendResources: () => {},
 		reload: async () => {},
+		setCwd: async () => {},
 	};
 }
 

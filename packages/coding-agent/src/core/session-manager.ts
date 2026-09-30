@@ -15,6 +15,8 @@ import { randomUUID } from "crypto";
 import {
 	appendFileSync,
 	closeSync,
+	constants,
+	copyFileSync,
 	createReadStream,
 	existsSync,
 	mkdirSync,
@@ -29,7 +31,7 @@ import {
 	writeFileSync,
 } from "fs";
 import { readdir, stat } from "fs/promises";
-import { basename, join, resolve } from "path";
+import { basename, join, parse, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
@@ -55,6 +57,16 @@ export interface SessionHeader {
 export interface NewSessionOptions {
 	id?: string;
 	parentSession?: string;
+}
+
+/** Result of moving a session to a different working directory. */
+export interface SessionCwdChange {
+	previousCwd: string;
+	cwd: string;
+	/** Session file after the move, or undefined for in-memory sessions. */
+	sessionFile: string | undefined;
+	/** True when the session file moved into the target cwd's session directory. */
+	relocated: boolean;
 }
 
 export interface SessionEntryBase {
@@ -1258,6 +1270,108 @@ export class SessionManager {
 
 	getCwd(): string {
 		return this.cwd;
+	}
+
+	/**
+	 * Point the session at a different working directory.
+	 *
+	 * Rewrites the header cwd, so resuming the session keeps the new directory. A session
+	 * stored in the default per-cwd session directory moves into the target directory's
+	 * bucket, which keeps cwd-scoped discovery (`--continue`, the session picker) working.
+	 * A custom session directory keeps the file where it is. The header rewrite is rolled
+	 * back when it fails.
+	 */
+	setCwd(cwd: string): SessionCwdChange {
+		const nextCwd = resolvePath(cwd);
+		const previousCwd = this.cwd;
+		if (nextCwd === previousCwd) {
+			return { previousCwd, cwd: previousCwd, sessionFile: this.sessionFile, relocated: false };
+		}
+
+		let nextCwdStats: Stats;
+		try {
+			nextCwdStats = statSync(nextCwd);
+		} catch {
+			throw new Error(`Cannot change the session working directory: ${nextCwd} does not exist`);
+		}
+		if (!nextCwdStats.isDirectory()) {
+			throw new Error(`Cannot change the session working directory: ${nextCwd} is not a directory`);
+		}
+
+		const header = this.fileEntries.find((entry): entry is SessionHeader => entry.type === "session");
+		const previousSessionDir = this.sessionDir;
+		const previousSessionFile = this.sessionFile;
+		const relocate = this.persist && previousSessionFile !== undefined && this.usesDefaultSessionDir();
+		const nextSessionDir = relocate ? getDefaultSessionDirPath(nextCwd) : previousSessionDir;
+		const nextSessionFile = relocate
+			? this._relocateSessionFile(previousSessionFile, nextSessionDir)
+			: previousSessionFile;
+		const fileMoved = nextSessionFile !== previousSessionFile;
+
+		if (header) header.cwd = nextCwd;
+		this.cwd = nextCwd;
+		this.sessionDir = nextSessionDir;
+		this.sessionFile = nextSessionFile;
+
+		try {
+			// Persist the new header only when the session file exists. A session that has not
+			// written its file yet keeps the header in memory and writes it on first flush.
+			if (this.persist && this.sessionFile !== undefined && existsSync(this.sessionFile)) {
+				this._rewriteFile();
+				if (fileMoved) this.flushed = true;
+			}
+		} catch (error) {
+			if (header) header.cwd = previousCwd;
+			this.cwd = previousCwd;
+			this.sessionDir = previousSessionDir;
+			this.sessionFile = previousSessionFile;
+			if (fileMoved && nextSessionFile !== undefined && previousSessionFile !== undefined) {
+				this._moveSessionFile(nextSessionFile, previousSessionFile);
+			}
+			throw error;
+		}
+
+		return {
+			previousCwd,
+			cwd: nextCwd,
+			sessionFile: this.sessionFile,
+			relocated: fileMoved,
+		};
+	}
+
+	/**
+	 * Move the session file into another session directory, keeping its name.
+	 *
+	 * Returns the new path. A name already taken in the target directory gets a numeric
+	 * suffix, so an existing session file is never overwritten.
+	 */
+	private _relocateSessionFile(sessionFile: string, targetDir: string): string {
+		mkdirSync(targetDir, { recursive: true });
+		const { name, ext } = parse(basename(sessionFile));
+		let target = join(targetDir, basename(sessionFile));
+		let suffix = 1;
+		while (existsSync(target)) {
+			target = join(targetDir, `${name}-${suffix++}${ext}`);
+		}
+		if (!existsSync(sessionFile)) {
+			return target;
+		}
+
+		this._moveSessionFile(sessionFile, target);
+		return target;
+	}
+
+	/** Move a session file, falling back to a copy across filesystems. */
+	private _moveSessionFile(from: string, to: string): void {
+		try {
+			renameSync(from, to);
+			return;
+		} catch (error) {
+			const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : undefined;
+			if (code !== "EXDEV") throw error;
+		}
+		copyFileSync(from, to, constants.COPYFILE_EXCL);
+		rmSync(from);
 	}
 
 	getSessionDir(): string {

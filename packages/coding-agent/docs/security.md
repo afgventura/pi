@@ -72,6 +72,8 @@ Saved decisions use canonical directory paths and live in:
 
 Use `/trust` to save a decision for future Pi processes.
 
+Changing the working directory mid-session (`/cd` or the `set_cwd` tool) asks the same question for the new directory. Interactive mode shows the prompt; print, JSON, and RPC modes follow the saved decision or `defaultProjectTrust`. A directory with no decision and no prompt loads without its protected resources.
+
 ### Project trust without an interactive prompt
 
 Print, JSON, and RPC modes cannot show the built-in trust prompt. If no command-line override, extension, or saved decision applies:

@@ -103,7 +103,8 @@ export class AgentSessionRuntime {
 	}
 
 	get cwd(): string {
-		return this._services.cwd;
+		// The session owns the live cwd: it can change in place without a runtime replacement.
+		return this._session.cwd;
 	}
 
 	get diagnostics(): readonly AgentSessionRuntimeDiagnostic[] {

@@ -154,6 +154,7 @@ export interface Settings {
 	shellBackgroundAfterSeconds?: number; // Seconds a shell command may run before it is moved to the background; 0 disables
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
 	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
+	quietExtensionWarnings?: boolean; // default: false - hide extension package manifest warnings (host-provided packages declared in dependencies)
 	enableInstallTelemetry?: boolean; // default: true - anonymous version/update ping after changelog-detected updates
 	enableAnalytics?: boolean; // default: false - opt-in analytics data sharing
 	trackingId?: string; // analytics tracking identifier, generated when analytics is enabled
@@ -214,7 +215,7 @@ function deepMergeObjects(base: Record<string, unknown>, overrides: Record<strin
 }
 
 /** Tools enabled at startup when `defaultTools` does not change them. */
-export const DEFAULT_TOOL_NAMES: readonly string[] = ["read", "bash", "edit", "write"];
+export const DEFAULT_TOOL_NAMES: readonly string[] = ["read", "bash", "edit", "write", "set_cwd"];
 
 function isToolModifier(entry: unknown): boolean {
 	return typeof entry === "string" && (entry.startsWith("+") || entry.startsWith("-"));
@@ -604,6 +605,37 @@ export class SettingsManager {
 			this.recordError("project", projectLoad.error);
 		}
 		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+	}
+
+	/**
+	 * Point the manager at another project directory.
+	 *
+	 * Project scope comes from `<cwd>/.pi/settings.json`, so a cwd change re-reads it.
+	 * Global scope and managers without file-backed paths are unaffected.
+	 */
+	async setCwd(cwd: string): Promise<void> {
+		const global = this.settingsPaths.global;
+		if (global === undefined) {
+			return;
+		}
+
+		const resolvedCwd = resolvePath(cwd);
+		const previousStorage = this.storage;
+		const previousSettingsPaths = this.settingsPaths;
+		this.storage = new FileSettingsStorage(resolvedCwd, dirname(global));
+		this.settingsPaths = {
+			global,
+			project: join(resolvedCwd, CONFIG_DIR_NAME, "settings.json"),
+		};
+
+		try {
+			await this.reload();
+		} catch (error) {
+			this.storage = previousStorage;
+			this.settingsPaths = previousSettingsPaths;
+			await this.reload();
+			throw error;
+		}
 	}
 
 	async reload(): Promise<void> {
@@ -1152,6 +1184,20 @@ export class SettingsManager {
 		this.globalSettings.collapseChangelog = collapse;
 		this.markModified("collapseChangelog");
 		this.save();
+	}
+
+	/**
+	 * Hide the extension package manifest warnings.
+	 *
+	 * Those warnings say an extension declares a host-provided package (typebox, the pi packages) in
+	 * `dependencies` rather than `peerDependencies` with a "*" range, which makes npm install a second
+	 * copy. They are accurate, but they are the package's problem to fix and installing or updating an
+	 * extension brings them straight back, so they cannot be resolved from this side. The resource
+	 * loader drops them at the source so no consumer (startup diagnostics, the loaded-resource listing,
+	 * or non-interactive output) shows them.
+	 */
+	getQuietExtensionWarnings(): boolean {
+		return this.settings.quietExtensionWarnings ?? false;
 	}
 
 	getEnableInstallTelemetry(): boolean {

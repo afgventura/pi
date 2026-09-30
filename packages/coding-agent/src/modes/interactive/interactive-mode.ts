@@ -3231,6 +3231,11 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/cd" || text.startsWith("/cd ")) {
+				this.editor.setText("");
+				await this.handleCwdCommand(text);
+				return;
+			}
 			if (text === "/login" || text.startsWith("/login ")) {
 				const providerRef = text.startsWith("/login ") ? text.slice(7).trim() : undefined;
 				this.editor.setText("");
@@ -3427,6 +3432,16 @@ export class InteractiveMode {
 				break;
 
 			case "session_info_changed":
+				this.updateTerminalTitle();
+				this.footer.invalidate();
+				this.ui.requestRender();
+				break;
+
+			case "cwd_change":
+				// The session keeps running; re-read the cwd-derived UI state and the
+				// resources the new directory brings in.
+				this.applyRuntimeSettings();
+				await this.bindCurrentSessionExtensions();
 				this.updateTerminalTitle();
 				this.footer.invalidate();
 				this.ui.requestRender();
@@ -6454,7 +6469,7 @@ export class InteractiveMode {
 		}
 	}
 
-	private getPathCommandArgument(text: string, command: "/export" | "/import"): string | undefined {
+	private getPathCommandArgument(text: string, command: "/export" | "/import" | "/cd"): string | undefined {
 		if (text === command) {
 			return undefined;
 		}
@@ -6481,6 +6496,33 @@ export class InteractiveMode {
 			return argsString;
 		}
 		return argsString.slice(0, firstWhitespaceIndex);
+	}
+
+	private async handleCwdCommand(text: string): Promise<void> {
+		const target = this.getPathCommandArgument(text, "/cd");
+		if (!target) {
+			this.showStatus(`Working directory: ${this.session.cwd}`);
+			return;
+		}
+		if (!this.session.isIdle) {
+			this.showWarning("Stop the current turn before changing the working directory.");
+			return;
+		}
+
+		try {
+			const change = await this.session.setCwd(target, {
+				projectTrustContext: this.createProjectTrustContext(target),
+			});
+			this.showStatus(
+				change.cwd === change.previousCwd
+					? `Working directory: ${change.cwd}`
+					: `Changed directory to ${change.cwd}`,
+			);
+		} catch (error: unknown) {
+			this.showError(
+				`Failed to change working directory: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 
 	private async handleImportCommand(text: string): Promise<void> {

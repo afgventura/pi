@@ -125,7 +125,7 @@ See [Settings](settings.md#tools) for configuring the default tool selection.
 - `-nt`, `--no-tools`<br>
   Starts with all built-in, extension, and custom tools disabled.
 
-Default enabled tools are `read`, `bash`, `edit`, and `write`, unless `defaultTools` changes them. `--tools` replaces the whole selection, so name every tool you want; `defaultTools` also accepts `+name` and `-name` to change the defaults instead.
+Default enabled tools are `read`, `bash`, `edit`, `write`, and `set_cwd`, unless `defaultTools` changes them. `--tools` replaces the whole selection, so name every tool you want; `defaultTools` also accepts `+name` and `-name` to change the defaults instead.
 
 | Built-in | Purpose |
 |---|---|
@@ -137,6 +137,7 @@ Default enabled tools are `read`, `bash`, `edit`, and `write`, unless `defaultTo
 | `grep` | Search file contents |
 | `find` | Find paths using glob patterns |
 | `ls` | List directory contents |
+| `set_cwd` | Change the session working directory |
 
 Built-in extensions add two more tools. They are off by default; the MCP extension turns them on when an MCP server needs them (see [MCP](mcp.md#exposure)). To enable them yourself, name them in `--tools` or `defaultTools`.
 
