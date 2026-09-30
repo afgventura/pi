@@ -137,6 +137,8 @@ Throw from `execute()` to produce a failed tool result.
 Returning an object does not mark it as an error.
 Return `terminate: true` only when the agent should skip its automatic follow-up after every completed tool in that batch agrees to terminate.
 
+A tool built with `createBashTool` moves a command that outlives `shellBackgroundAfterSeconds` (default 60) to the background: the call returns the output so far and the running session is told when the command exits. An extension that re-registers `bash` inherits this, and passes `backgroundAfterSeconds: 0` or its own `onBackgroundJob` to change it.
+
 Use sequential execution when tools share mutable in-memory state.
 File-mutating tools should wrap the complete read-modify-write operation with `withFileMutationQueue()`.
 Truncate large model-facing results and tell the model where to read the complete output.
