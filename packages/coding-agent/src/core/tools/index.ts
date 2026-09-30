@@ -88,11 +88,14 @@ import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { createPowerShellTool, createPowerShellToolDefinition, type PowerShellToolOptions } from "./powershell.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
+import { createSetCwdTool, createSetCwdToolDefinition, type SetCwdToolOptions } from "./set-cwd.ts";
 import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
-export type ToolName = "read" | "bash" | "powershell" | "edit" | "write" | "grep" | "find" | "ls";
+export type { SetCwdRequest, SetCwdToolInput, SetCwdToolOptions } from "./set-cwd.ts";
+export { createSetCwdTool, createSetCwdToolDefinition } from "./set-cwd.ts";
+export type ToolName = "read" | "bash" | "powershell" | "edit" | "write" | "grep" | "find" | "ls" | "set_cwd";
 export const allToolNames: Set<ToolName> = new Set([
 	"read",
 	"bash",
@@ -102,7 +105,23 @@ export const allToolNames: Set<ToolName> = new Set([
 	"grep",
 	"find",
 	"ls",
+	"set_cwd",
 ]);
+
+/**
+ * Fallback for runtimes that build every tool without a session to change.
+ * `set_cwd` requires a cwd-change handler, so executing it here fails loudly
+ * instead of silently doing nothing.
+ */
+const unavailableSetCwdOptions: SetCwdToolOptions = {
+	changeCwd: async () => {
+		throw new Error("set_cwd is unavailable: this runtime cannot change the session working directory");
+	},
+};
+
+function resolveSetCwdToolOptions(options?: ToolsOptions): SetCwdToolOptions {
+	return options?.setCwd ?? unavailableSetCwdOptions;
+}
 
 export interface ToolsOptions {
 	read?: ReadToolOptions;
@@ -113,6 +132,7 @@ export interface ToolsOptions {
 	grep?: GrepToolOptions;
 	find?: FindToolOptions;
 	ls?: LsToolOptions;
+	setCwd?: SetCwdToolOptions;
 }
 
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {
@@ -133,6 +153,8 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 			return createFindToolDefinition(cwd, options?.find);
 		case "ls":
 			return createLsToolDefinition(cwd, options?.ls);
+		case "set_cwd":
+			return createSetCwdToolDefinition(cwd, resolveSetCwdToolOptions(options));
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -156,6 +178,8 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			return createFindTool(cwd, options?.find);
 		case "ls":
 			return createLsTool(cwd, options?.ls);
+		case "set_cwd":
+			return createSetCwdTool(cwd, resolveSetCwdToolOptions(options));
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -189,6 +213,7 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 		grep: createGrepToolDefinition(cwd, options?.grep),
 		find: createFindToolDefinition(cwd, options?.find),
 		ls: createLsToolDefinition(cwd, options?.ls),
+		set_cwd: createSetCwdToolDefinition(cwd, resolveSetCwdToolOptions(options)),
 	};
 }
 
@@ -220,5 +245,6 @@ export function createAllTools(cwd: string, options?: ToolsOptions): Record<Tool
 		grep: createGrepTool(cwd, options?.grep),
 		find: createFindTool(cwd, options?.find),
 		ls: createLsTool(cwd, options?.ls),
+		set_cwd: createSetCwdTool(cwd, resolveSetCwdToolOptions(options)),
 	};
 }

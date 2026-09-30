@@ -29,6 +29,7 @@ Extensions, prompt templates, and skills can add commands. The command menu in P
 | `/clone` | Duplicate the current session at its current position |
 | `/compact [instructions]` | Compact the current context, optionally with custom instructions |
 | `/import <path>` | Import and resume a JSONL session |
+| `/cd [dir]` | Change the session working directory, or show it when omitted |
 
 ## Export and share
 

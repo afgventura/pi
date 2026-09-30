@@ -104,6 +104,8 @@ export interface ResourceLoader {
 	getAppendSystemPromptSources(): Array<{ path: string }>;
 	extendResources(paths: ResourceExtensionPaths): void;
 	reload(options?: ResourceLoaderReloadOptions): Promise<void>;
+	/** Point the loader at another project directory and re-read project resources. */
+	setCwd(cwd: string, options?: ResourceLoaderReloadOptions): Promise<void>;
 }
 
 function resolvePromptInput(input: string | undefined, description: string): string | undefined {
@@ -440,6 +442,38 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return this.loadCurrentExtensionSet({ includeInlineFactories: true });
 	}
 
+	/**
+	 * Point the loader at another project directory.
+	 *
+	 * Project config, context files, skills, prompts, themes, extensions, and packages all
+	 * resolve from the loader's cwd, so a cwd change re-reads them. CLI-provided resource
+	 * paths stay as they are and are resolved against the new cwd like project resources.
+	 */
+	async setCwd(cwd: string, options?: ResourceLoaderReloadOptions): Promise<void> {
+		const resolvedCwd = resolvePath(cwd);
+		if (resolvedCwd === this.cwd) {
+			await this.reload(options);
+			return;
+		}
+
+		const previousCwd = this.cwd;
+		const previousPackageManager = this.packageManager;
+		this.cwd = resolvedCwd;
+		this.packageManager = new DefaultPackageManager({
+			cwd: this.cwd,
+			agentDir: this.agentDir,
+			settingsManager: this.settingsManager,
+		});
+
+		try {
+			await this.reload(options);
+		} catch (error) {
+			this.cwd = previousCwd;
+			this.packageManager = previousPackageManager;
+			throw error;
+		}
+	}
+
 	async reload(options?: ResourceLoaderReloadOptions): Promise<void> {
 		resetTimings("extensions");
 
@@ -508,7 +542,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			? cliEnabledExtensions
 			: this.mergePaths(cliEnabledExtensions, enabledExtensions);
 
-		const packageWarnings = collectExtensionPackageWarnings(extensionPaths, metadataByPath);
+		const packageWarnings = this.collectPackageWarnings(extensionPaths, metadataByPath);
 		const extensionsResult = await this.loadFinalExtensionSet(extensionPaths, preTrustExtensions);
 		mergeExtensionWarnings(extensionsResult, packageWarnings);
 		for (const p of this.additionalExtensionPaths) {
@@ -603,6 +637,21 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.loaded = true;
 	}
 
+	/**
+	 * Package manifest warnings are the extension author's to fix, so `quietExtensionWarnings` drops them
+	 * here. This is the single source of truth shared by the startup diagnostics and the loaded-resource
+	 * listing.
+	 */
+	private collectPackageWarnings(
+		extensionPaths: string[],
+		metadataByPath: Map<string, PathMetadata>,
+	): Array<{ path: string; warning: string }> {
+		if (this.settingsManager.getQuietExtensionWarnings()) {
+			return [];
+		}
+		return collectExtensionPackageWarnings(extensionPaths, metadataByPath);
+	}
+
 	private async loadCurrentExtensionSet(options: { includeInlineFactories: boolean }): Promise<LoadExtensionsResult> {
 		const resolvedPaths = await this.packageManager.resolve();
 		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
@@ -619,7 +668,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 				resource.metadata,
 			]),
 		);
-		const packageWarnings = collectExtensionPackageWarnings(extensionPaths, metadataByPath);
+		const packageWarnings = this.collectPackageWarnings(extensionPaths, metadataByPath);
 		const extensionsResult = await loadExtensionsCached(extensionPaths, this.cwd, this.eventBus);
 		mergeExtensionWarnings(extensionsResult, packageWarnings);
 		if (!options.includeInlineFactories) {
