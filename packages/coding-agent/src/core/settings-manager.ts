@@ -26,6 +26,8 @@ const DEFAULT_COMPACTION_TOKEN_SETTINGS: Required<CompactionModelOverride> = {
 	keepRecentTokens: 20000,
 };
 
+const DEFAULT_TRANSCRIPT_MAX_LINES = 20000;
+
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
@@ -189,6 +191,7 @@ export interface Settings {
 	fullscreenScrollbar?: ScrollViewScrollbar; // default: "auto"; no effect in regular TUI mode
 	fullscreenCopyOnSelect?: boolean; // default: true; no effect in regular TUI mode
 	fullscreenWheelScrollLines?: WheelScrollLines; // default: "auto"; lines per wheel event, 1-100
+	transcriptMaxLines?: number; // Rendered transcript lines kept in the interactive transcript; older items are dropped (default: 20000; 0 = unlimited)
 }
 
 function isMergeableObject(value: unknown): value is Record<string, unknown> {
@@ -1459,6 +1462,28 @@ export class SettingsManager {
 		this.globalSettings.fullscreenWheelScrollLines =
 			lines === "auto" ? lines : Math.max(1, Math.min(100, Math.floor(lines)));
 		this.markModified("fullscreenWheelScrollLines");
+		this.save();
+	}
+
+	/**
+	 * Rendered transcript lines kept in the interactive transcript. Items that no longer fit are
+	 * dropped from the top, so a frame costs the window instead of the whole session. `0` keeps
+	 * everything, including the unbounded behaviour before this setting existed.
+	 */
+	getTranscriptMaxLines(): number {
+		const lines = this.settings.transcriptMaxLines;
+		if (typeof lines !== "number" || !Number.isFinite(lines)) {
+			return DEFAULT_TRANSCRIPT_MAX_LINES;
+		}
+		return lines <= 0 ? 0 : Math.floor(lines);
+	}
+
+	setTranscriptMaxLines(lines: number): void {
+		if (!Number.isFinite(lines)) {
+			throw new Error(`Invalid transcriptMaxLines setting: ${String(lines)}`);
+		}
+		this.globalSettings.transcriptMaxLines = Math.max(0, Math.floor(lines));
+		this.markModified("transcriptMaxLines");
 		this.save();
 	}
 

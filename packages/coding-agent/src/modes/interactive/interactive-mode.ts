@@ -199,6 +199,7 @@ import {
 	theme,
 } from "./theme/theme.ts";
 import { InteractiveThemeController } from "./theme/theme-controller.ts";
+import { TranscriptWindow } from "./transcript-window.ts";
 import { createInteractiveTui, createInteractiveTuiReference } from "./tui-renderer.ts";
 
 export { createInteractiveTui, createInteractiveTuiReference } from "./tui-renderer.ts";
@@ -621,7 +622,7 @@ export class InteractiveMode {
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
 		this.loadedResourcesContainer = new Container();
-		this.chatContainer = new Container();
+		this.chatContainer = new TranscriptWindow(() => this.settingsManager.getTranscriptMaxLines());
 		this.documentContainer = new Container();
 		this.documentContainer.addChild(this.headerContainer);
 		this.documentContainer.addChild(this.loadedResourcesContainer);
@@ -4882,6 +4883,7 @@ export class InteractiveMode {
 					fullscreenScrollbar: this.settingsManager.getFullscreenScrollbar(),
 					fullscreenCopyOnSelect: this.settingsManager.getFullscreenCopyOnSelect(),
 					fullscreenWheelScrollLines: this.settingsManager.getFullscreenWheelScrollLines(),
+					transcriptMaxLines: this.settingsManager.getTranscriptMaxLines(),
 					warnings: this.settingsManager.getWarnings(),
 				},
 				{
@@ -5065,6 +5067,9 @@ export class InteractiveMode {
 					onFullscreenWheelScrollLinesChange: (lines) => {
 						this.settingsManager.setFullscreenWheelScrollLines(lines);
 						if (this.renderer instanceof TuiAltScreen) this.renderer.setWheelScrollLines(lines);
+					},
+					onTranscriptMaxLinesChange: (lines) => {
+						this.settingsManager.setTranscriptMaxLines(lines);
 					},
 					onWarningsChange: (warnings) => {
 						this.settingsManager.setWarnings(warnings);

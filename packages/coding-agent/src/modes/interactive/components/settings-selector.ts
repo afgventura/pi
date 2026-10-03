@@ -97,6 +97,7 @@ export interface SettingsConfig {
 	fullscreenScrollbar: ScrollViewScrollbar;
 	fullscreenCopyOnSelect: boolean;
 	fullscreenWheelScrollLines: WheelScrollLines;
+	transcriptMaxLines: number;
 	warnings: WarningSettings;
 }
 
@@ -136,6 +137,7 @@ export interface SettingsCallbacks {
 	onFullscreenScrollbarChange: (mode: ScrollViewScrollbar) => void;
 	onFullscreenCopyOnSelectChange: (enabled: boolean) => void;
 	onFullscreenWheelScrollLinesChange: (lines: WheelScrollLines) => void;
+	onTranscriptMaxLinesChange: (lines: number) => void;
 	onWarningsChange: (warnings: WarningSettings) => void;
 	onCancel: () => void;
 }
@@ -745,6 +747,18 @@ export class SettingsSelectorComponent extends Container {
 				],
 			},
 			{
+				id: "transcript-max-lines",
+				label: "Transcript line limit",
+				description:
+					"Rendered transcript lines kept in the transcript; older items are dropped from the top (0 = unlimited)",
+				currentValue: String(config.transcriptMaxLines),
+				values: [
+					...[...new Set([0, 2000, 5000, 10000, 20000, 50000, 100000, config.transcriptMaxLines])]
+						.sort((a, b) => a - b)
+						.map(String),
+				],
+			},
+			{
 				id: "theme",
 				label: "Theme",
 				description: "Color theme for the interface",
@@ -973,6 +987,9 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "fullscreen-wheel-scroll-lines":
 						callbacks.onFullscreenWheelScrollLinesChange(newValue === "auto" ? "auto" : parseInt(newValue, 10));
+						break;
+					case "transcript-max-lines":
+						callbacks.onTranscriptMaxLinesChange(parseInt(newValue, 10));
 						break;
 					case "theme":
 						callbacks.onThemeChange(newValue);
