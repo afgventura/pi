@@ -183,6 +183,7 @@ describe("defaultTools setting", () => {
 			"grep",
 			"inactive_tool",
 			"read",
+			"set_cwd",
 		]);
 		session.dispose();
 
