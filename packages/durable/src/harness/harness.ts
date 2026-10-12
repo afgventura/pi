@@ -25,6 +25,7 @@ import { createCompaction } from "./compaction.ts";
 import { readContext } from "./context.ts";
 import { InboxDoc, withdrawQueuedInputs } from "./inbox.ts";
 import { LiveDoc, settleSchedulerOutcome } from "./live.ts";
+import { ProviderDoc } from "./provider.ts";
 import { BUILTIN_TASKS } from "./registry.ts";
 import { type InvocationBinding, TaskScheduler } from "./scheduler.ts";
 import { Submissions } from "./submissions.ts";
@@ -119,8 +120,8 @@ class ConversationImpl<Tool extends ToolRegistration> implements Conversation {
 		return this.#host.harness.commitWith(change, context, { conversationId: this.id });
 	}
 
-	context(context: Context): Promise<ContextView> {
-		return readContext(this.#host.harness, this.#host.storage, this.id, context);
+	context(context: Context, options?: { readonly at?: EntryId }): Promise<ContextView> {
+		return readContext(this.#host.harness, this.#host.storage, this.id, context, options?.at);
 	}
 
 	entries(
@@ -133,6 +134,7 @@ class ConversationImpl<Tool extends ToolRegistration> implements Conversation {
 			conversationId: this.id,
 			...(query.minEntryId === undefined ? {} : { minEntryId: query.minEntryId }),
 			...(query.maxEntryId === undefined ? {} : { maxEntryId: query.maxEntryId }),
+			...(query.order === undefined ? {} : { order: query.order }),
 		};
 		return this.#host.harness.readOnLine(() => this.#host.storage.scanEntries(bounded, limit, cursor, context));
 	}
@@ -172,7 +174,7 @@ class HarnessImpl<Tool extends ToolRegistration> extends SessionImpl implements 
 	#closed = false;
 
 	constructor(storage: Storage, options: HarnessOptions<Tool>, context: Context) {
-		super(storage);
+		super(storage, options.now);
 		this.#storage = storage;
 		this.#options = options;
 		this.#report = options.onReport ?? (() => {});
@@ -349,12 +351,14 @@ class HarnessImpl<Tool extends ToolRegistration> extends SessionImpl implements 
 
 	/**
 	 * The built-in creation hook, in every commit that creates or forks a conversation: empty `pi.live`, `pi.inbox`, and
-	 * `pi.usage`, the conversation's `pi.agent` (see `createAgent()`), then `HarnessOptions.conversationCreated`.
+	 * `pi.usage`, a fresh `pi.provider`, the conversation's `pi.agent` (see `createAgent()`), then
+	 * `HarnessOptions.conversationCreated`.
 	 */
 	protected override async conversationCreated(tx: Transaction, record: ConversationRecord): Promise<void> {
 		await tx.doc(LiveDoc, record.id);
 		await tx.doc(InboxDoc, record.id);
 		await tx.doc(UsageDoc, record.id);
+		await tx.doc(ProviderDoc, record.id);
 		await createAgent(tx, record);
 		await this.#options.conversationCreated?.(tx, record);
 	}

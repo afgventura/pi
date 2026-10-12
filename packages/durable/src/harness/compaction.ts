@@ -16,6 +16,7 @@ import type {
 } from "../types.ts";
 import { orderToolResults } from "./context.ts";
 import { addCompactionStatus, compactionStatus, LiveDoc, type LiveState, removeCompactionStatus } from "./live.ts";
+import { ensureProviderSessionId } from "./provider.ts";
 import { admitSubmission } from "./submissions.ts";
 import type {
 	CompactionHooks,
@@ -150,7 +151,7 @@ export const CompactionTask = defineTask<CompactionInput, CompactionCheckpoint, 
 			const model = runtime.models.getModel(ref.provider, ref.modelId);
 			if (model === undefined) return failNoModel(runtime, ref, context);
 			// The context at `tail` is immutable, so this is the range `select` chose.
-			const view = await runtime.context(runtime.conversationId, context, tail);
+			const view = await runtime.context(runtime.conversationId, context, { at: tail });
 			const cut = view.entries.findIndex((entry) => entry.id === firstKept);
 			const now = runtime.now();
 			const messages: Message[] = [
@@ -167,6 +168,7 @@ export const CompactionTask = defineTask<CompactionInput, CompactionCheckpoint, 
 				cacheRetention: "none",
 				maxTokens,
 				signal: runtime.signal,
+				sessionId: await ensureProviderSessionId(runtime, context),
 				...(thinkingLevel === "off" ? {} : { reasoning: thinkingLevel }),
 			};
 			const message = await runtime.models.completeSimple(model, { messages }, options);
